@@ -7,7 +7,7 @@
 use iroh::{PublicKey, SecretKey, Signature};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tovuer_proto::{ChannelKind, FileMeta, ReplyRef};
+use tovuer_proto::{ChannelKind, FileMeta, ReplyRef, TextStyle};
 
 use crate::room::RoomKeys;
 use crate::util::{canonical_json, hex, unhex};
@@ -42,6 +42,9 @@ pub enum Body {
         reply: Option<ReplyRef>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         file: Option<FileMeta>,
+        /// How the author wants the text to look (newer clients; older ones ignore it).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<TextStyle>,
     },
     Edit { id: u64, text: String },
     Delete { id: u64 },
@@ -109,7 +112,7 @@ mod tests {
     fn ops_are_signed_for_one_room() {
         let room = RoomKeys::derive("home", "");
         let secret = SecretKey::from_bytes(&[7u8; 32]);
-        let body = Body::Msg { channel: "general".into(), text: "hi".into(), reply: None, file: None };
+        let body = Body::Msg { channel: "general".into(), text: "hi".into(), reply: None, file: None, style: None };
         let op = Op::new(&secret, &room, 1, 1_700_000_000_000, "dana", &body);
         assert!(op.verify(&room));
         assert_eq!(op.body(), body);

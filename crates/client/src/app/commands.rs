@@ -45,6 +45,9 @@ pub const COMMANDS: &[CommandSpec] = &[
     cmd(&["transparent"], "[on|off]", "transparent background"),
     cmd(&["previews"], "[on|off]", "picture thumbnails in the chat"),
     cmd(&["sharp"], "[on|off]", "real pixels in the picture viewer (sixel/kitty)"),
+    cmd(&["style"], "", "how your messages look: color, gradient, markup (F4)"),
+    cmd(&["color", "colour"], "[name|#rrggbb|off]", "the color of your messages"),
+    cmd(&["gradient"], "[name|#hex #hex…|off]", "a gradient for your messages: sunset, neon, rainbow…"),
     cmd(&["mouse"], "[on|off]", "mouse: wheel and clicks"),
     cmd(&["settings"], "", "the settings window"),
     cmd(&["new", "newtext"], "[name]", "create a text channel"),
@@ -161,6 +164,8 @@ impl App {
                     None => self.warn(format!("“{arg}” is not a picture from the /files list")),
                 }
             }
+            "style" => self.open_style(),
+            "color" | "gradient" => self.style_command(spec.names[0] == "gradient", arg),
             "open" => {
                 let file = if arg.is_empty() {
                     self.channel_files().pop().map(|(f, _)| f)
@@ -370,7 +375,8 @@ impl App {
                 };
                 match self.channel().map(|c| c.name.clone()) {
                     Some(channel) if self.online() => {
-                        self.net.send(ClientMsg::Send { channel, text, reply_to: None });
+                        let style = self.settings.style.clean();
+                        self.net.send(ClientMsg::Send { channel, text, reply_to: None, style });
                         self.scroll_to_bottom();
                     }
                     _ => self.warn("not in the room"),

@@ -8,6 +8,7 @@ pub mod input;
 mod keys;
 pub mod model;
 pub mod overlay;
+pub mod style;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -1127,7 +1128,8 @@ impl App {
             _ => None,
         };
         let body = text.strip_prefix('/').filter(|_| text.starts_with("//")).unwrap_or(text);
-        self.net.send(ClientMsg::Send { channel, text: emoji::expand(body), reply_to });
+        let style = self.settings.style.clean();
+        self.net.send(ClientMsg::Send { channel, text: emoji::expand(body), reply_to, style });
         self.last_typing = None;
         if let Some(ch) = self.channel_mut() {
             ch.first_unread = None;
@@ -1226,6 +1228,7 @@ impl App {
         actions.push(act("📎", "Send a file…".into(), "Ctrl+O", Cmd::Upload));
         actions.push(act("🔊", "Peer volumes…".into(), "F3", Cmd::Users));
         actions.push(act("⚙", "Settings…".into(), "F2", Cmd::Settings));
+        actions.push(act("✎", "Your message style: color, gradient, markup…".into(), "F4", Cmd::Style));
         actions.push(act("#", "Create a text channel…".into(), "/new", Cmd::NewChannel(ChannelKind::Text)));
         actions.push(act("🔊", "Create a voice channel…".into(), "/newvoice", Cmd::NewChannel(ChannelKind::Voice)));
         let members = if self.settings.members { "Hide the online panel" } else { "Show the online panel" };
@@ -1262,6 +1265,7 @@ impl App {
             Cmd::Deafen => self.toggle_deafen(),
             Cmd::Upload => self.open_picker(),
             Cmd::Settings => self.open_settings(),
+            Cmd::Style => self.open_style(),
             Cmd::Users => self.overlay = Some(Overlay::Users { sel: 0 }),
             Cmd::Theme(name) => {
                 self.set_theme(&name);

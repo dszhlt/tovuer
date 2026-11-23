@@ -36,6 +36,11 @@ and Windows.
   unread marks survive restarts.
 - Markup: `**bold**`, `*italic*`, `~~strike~~`, `` `code` ``, code blocks,
   `>` quotes, links, emoji by code (`:fire:` → 🔥).
+- Your own message style (`F4`): a color, a gradient that keeps flowing along
+  the text (sunset, neon, rainbow… or your own 2–4 colors), and bold /
+  italic / strike / code for everything you write. It travels with each
+  message, so everyone sees it; colors are kept readable on each reader's
+  theme, and anyone can show others' styles still or turn them off.
 - Files up to 50 MB, sent byte for byte. Pictures right in the feed and full
   screen. The full-screen viewer draws real pixels where the terminal has
   graphics (Sixel — foot, xterm; Kitty — kitty, Ghostty; iTerm2 — WezTerm),
@@ -55,6 +60,11 @@ and Windows.
 | The command palette (`Ctrl+K`) | Settings (`F2`) |
 |---|---|
 | ![The command palette: go to a channel, join voice, create a channel, switch the theme](docs/screenshots/palette.png) | ![The settings window: theme, previews, sharp pictures, microphone and speakers, noise suppression](docs/screenshots/settings.png) |
+
+Your message style (`F4`) — a color or a gradient that keeps flowing, and
+markup for everything you write:
+
+![The message style window: a live preview with a flowing aurora gradient, color, gradient, bold, italic, strike, code](docs/screenshots/style.png)
 
 ![Four of the themes: tokyo-night, gruvbox, everforest and sunset](docs/screenshots/themes.png)
 
@@ -147,6 +157,7 @@ The details are in [protocol.md](protocol.md).
 | `Alt+D` | sound: hear no one and stay silent |
 | `Ctrl+O` | send a file (or drop a file into the terminal window) |
 | `F1` · `F2` · `F3` | help · settings · peer volumes (`F3` — also `U` on an empty line) |
+| `F4` | your message style: color, flowing gradient, bold / italic / strike / code |
 | `Ctrl+L` | system log |
 | `Ctrl+Q` | quit |
 
@@ -175,6 +186,7 @@ channel…", "Delete channel #…".
 | `/denoise`, `/agc` | noise suppression and automatic level (`on`/`off`) |
 | `/devices`, `/mic [name]`, `/spk [name]` | devices; `/mic` without a name — audio diagnostics |
 | `/theme [name\|next]`, `/transparent`, `/previews`, `/sharp`, `/mouse` | looks (`/sharp` — real pixels in the viewer) |
+| `/style`, `/color [name\|#rrggbb\|off]`, `/gradient [name\|#hex #hex…\|off]` | how your messages look (`/gradient sunset`, `/color #ff8800`) |
 | `/new [name]`, `/newvoice [name]`, `/topic <text>` | create a text / voice channel (without a name — asks), the topic |
 | `/delchannel [name]`, `/kick <nick>` | room owner only: delete a text or voice channel (without a name — the open one), remove someone |
 | `/me <action>`, `/shrug` | small things |

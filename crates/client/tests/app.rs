@@ -113,6 +113,7 @@ impl Harness {
                 file: None,
                 reactions: Vec::new(),
                 system: false,
+                style: None,
             },
         });
     }
@@ -298,12 +299,12 @@ fn name_on_command_line_skips_login() {
 fn sending_text_commands_and_offline_safety() {
     let mut h = Harness::online("send");
     h.say("hi :fire: all");
-    assert_eq!(h.sent(), vec![ClientMsg::Send { channel: "general".into(), text: "hi 🔥 all".into(), reply_to: None }]);
+    assert_eq!(h.sent(), vec![ClientMsg::Send { channel: "general".into(), text: "hi 🔥 all".into(), reply_to: None, style: None }]);
     assert!(h.app.input.is_empty());
 
     // a double slash is plain text that starts with a slash
     h.say("//shrug is not a command");
-    assert_eq!(h.sent(), vec![ClientMsg::Send { channel: "general".into(), text: "/shrug is not a command".into(), reply_to: None }]);
+    assert_eq!(h.sent(), vec![ClientMsg::Send { channel: "general".into(), text: "/shrug is not a command".into(), reply_to: None, style: None }]);
 
     h.say("/me drinks tea");
     h.say("/shrug");
@@ -532,7 +533,7 @@ fn reply_edit_delete_react_and_copy() {
     assert!(matches!(&h.app.compose, Some(Compose::Reply { id: 11, from, .. }) if from == "bob"));
     assert!(h.screen(120, 40).contains("↪ bob: @dana could you check"));
     h.say("on it");
-    assert_eq!(h.sent(), vec![ClientMsg::Send { channel: "general".into(), text: "on it".into(), reply_to: Some(11) }]);
+    assert_eq!(h.sent(), vec![ClientMsg::Send { channel: "general".into(), text: "on it".into(), reply_to: Some(11), style: None }]);
 
     // a reaction
     h.key(KeyCode::BackTab);
@@ -601,7 +602,7 @@ fn completion_for_commands_names_and_emoji() {
     h.key(KeyCode::Tab);
     assert_eq!(h.app.input.text(), "hey @bob 🔥 ");
     h.key(KeyCode::Enter);
-    assert_eq!(h.sent(), vec![ClientMsg::Send { channel: "general".into(), text: "hey @bob 🔥".into(), reply_to: None }]);
+    assert_eq!(h.sent(), vec![ClientMsg::Send { channel: "general".into(), text: "hey @bob 🔥".into(), reply_to: None, style: None }]);
 
     // Enter with suggestions open completes the command instead of sending a stub
     h.typed("/he");
@@ -756,6 +757,7 @@ fn old_message(id: u64, text: String) -> Message {
         file: None,
         reactions: Vec::new(),
         system: false,
+        style: None,
     }
 }
 
@@ -884,7 +886,7 @@ fn settings_window_edits_and_saves() {
     let text = h.screen(120, 40);
     assert!(text.contains("Transparent background") && text.contains("‹ on ›"), "{text}");
     // the mouse turns on at once, without a restart
-    for _ in 0..4 {
+    for _ in 0..6 {
         h.key(KeyCode::Down);
     }
     h.key(KeyCode::Char(' '));
@@ -1061,7 +1063,7 @@ fn deleting_open_channel_restores_destination_draft() {
     assert_eq!((h.app.channel_name(), h.app.input.text()), ("general", "general draft"));
     h.sent();
     h.key(KeyCode::Enter);
-    assert_eq!(h.sent(), vec![ClientMsg::Send { channel: "general".into(), text: "general draft".into(), reply_to: None }]);
+    assert_eq!(h.sent(), vec![ClientMsg::Send { channel: "general".into(), text: "general draft".into(), reply_to: None, style: None }]);
 }
 
 #[test]
@@ -1135,4 +1137,110 @@ fn explicit_room_overrides_saved_credentials() {
         assert_eq!((config.room.as_str(), config.password.as_deref()), (expected_room, expected_password));
         h.app.paths.save_settings(&settings).unwrap();
     }
+}
+
+#[test]
+fn your_own_message_style_travels_with_what_you_send() {
+    use tovuer_proto::TextStyle;
+    let mut h = Harness::online("style");
+    h.cmds();
+
+    // F4: the style window; ← → walk the ready colors, Enter takes your own
+    h.key(KeyCode::F(4));
+    assert!(h.screen(120, 40).contains("Your message style"));
+    h.key(KeyCode::Right);
+    assert_eq!(h.app.settings.style.color.as_deref(), Some("#ff5f6d"), "the first ready color: red");
+    h.key(KeyCode::Enter);
+    assert!(h.screen(120, 40).contains("Your color"));
+    h.key(KeyCode::Backspace);
+    h.typed("nonsense");
+    h.key(KeyCode::Enter);
+    assert!(h.last_toast().1.contains("not a color"), "a wrong color keeps the prompt open");
+    for _ in 0.."#ff5f6nonsense".len() {
+        h.key(KeyCode::Backspace);
+    }
+    h.typed("#123abc");
+    h.key(KeyCode::Enter);
+    assert!(matches!(h.app.overlay, Some(Overlay::Style(_))), "back in the style window");
+    assert_eq!(h.app.settings.style.color.as_deref(), Some("#123abc"));
+    // a gradient (it wins over the color), bold on, then close: it is saved
+    h.key(KeyCode::Down);
+    h.key(KeyCode::Right);
+    assert_eq!(h.app.settings.style.gradient.len(), 3, "sunset");
+    for _ in 0..2 {
+        h.key(KeyCode::Down);
+    }
+    h.key(KeyCode::Enter);
+    assert!(h.app.settings.style.bold);
+    let text = h.screen(120, 40);
+    assert!(text.contains("sunset") && text.contains("‹ on ›"), "{text}");
+    h.key(KeyCode::Esc);
+    assert!(h.app.overlay.is_none());
+    assert_eq!(Paths::at(&h.dir).load_settings().style, h.app.settings.style);
+
+    // what you send carries the style; a flowing gradient keeps the screen moving
+    h.say("look at me");
+    let sent = h.sent();
+    let ClientMsg::Send { style: Some(style), .. } = &sent[0] else { panic!("no style in {sent:?}") };
+    assert_eq!((style.gradient.len(), style.flow, style.bold, style.color.is_none()), (3, true, true, true));
+    h.typed("typing shows it too");
+    h.screen(120, 40);
+    assert!(h.app.ui.animating, "the input previews the flowing gradient");
+    h.app.dirty = false;
+    h.app.on_tick();
+    assert!(h.app.dirty, "each tick redraws while something flows");
+
+    // commands do the same
+    h.app.input.set("");
+    h.say("/color sky");
+    assert_eq!((h.app.settings.style.color.as_deref(), h.app.settings.style.gradient.is_empty()), (Some("#48dbfb"), true));
+    assert!(h.last_toast().1.contains("sky, bold"));
+    h.say("/gradient #ff0000 #00ff00 #0000ff");
+    assert_eq!(h.app.settings.style.gradient, vec!["#ff0000", "#00ff00", "#0000ff"]);
+    h.say("/gradient blurple");
+    assert!(h.last_toast().1.contains("not a color"));
+    h.say("/style");
+    assert!(matches!(h.app.overlay, Some(Overlay::Style(_))));
+    for _ in 0..7 {
+        h.key(KeyCode::Down);
+    }
+    h.key(KeyCode::Enter);
+    h.key(KeyCode::Esc);
+    assert_eq!(h.app.settings.style.clean(), None, "back to plain");
+    h.say("plain again");
+    assert!(matches!(&h.sent()[0], ClientMsg::Send { style: None, .. }));
+
+    // someone else's style: drawn in their colors, unless you turn styles off
+    let styled = Message {
+        id: 500,
+        channel: "general".into(),
+        from: "kate".into(),
+        ts: tovuer_proto::now_ms(),
+        text: "shiny".into(),
+        reply: None,
+        edited: None,
+        file: None,
+        reactions: Vec::new(),
+        system: false,
+        style: Some(TextStyle { color: Some("#ff0000".into()), italic: true, ..TextStyle::default() }),
+    };
+    h.server(ServerMsg::Msg { msg: styled });
+    let find = |h: &mut Harness| {
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        ui::render(&mut buf, area, &mut h.app);
+        let at = (0..40).find_map(|y| {
+            let row: String = (0..120).map(|x| buf[(x, y)].symbol().to_string()).collect();
+            row.find("shiny").map(|x| (x as u16, y))
+        });
+        let (x, y) = at.expect("the message is on screen");
+        buf[(x, y)].clone()
+    };
+    let cell = find(&mut h);
+    assert_eq!(cell.fg, ratatui::style::Color::Rgb(255, 0, 0));
+    assert!(cell.modifier.contains(ratatui::style::Modifier::ITALIC));
+    h.app.settings.styles = 0;
+    h.app.ui.invalidate();
+    let cell = find(&mut h);
+    assert_eq!(cell.fg, h.app.theme.text, "styles of others are off: plain text");
 }

@@ -310,6 +310,7 @@ mod tests {
             file: None,
             reactions: Vec::new(),
             system: false,
+            style: None,
         }
     }
 

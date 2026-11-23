@@ -133,7 +133,7 @@ async fn chat_and_voice_between_two_clients() {
     let mut dana = Peer::join(&dir, &rooms, 1, "dana").await;
     let mut bob = Peer::join(&dir, &rooms, 2, "bob").await;
 
-    dana.net.send(ClientMsg::Send { channel: "general".into(), text: "hello".into(), reply_to: None });
+    dana.net.send(ClientMsg::Send { channel: "general".into(), text: "hello".into(), reply_to: None, style: None });
     let got = bob.chat_msg().await;
     assert_eq!((got.from.as_str(), got.text.as_str()), ("dana", "hello"));
 

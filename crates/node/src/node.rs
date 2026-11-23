@@ -1032,13 +1032,14 @@ impl Inner {
         let owner = core.room.owner() == Some(self.me);
         let mut effect = Ok(Effect::None);
         match msg {
-            ClientMsg::Send { channel, text, reply_to } => {
+            ClientMsg::Send { channel, text, reply_to, style } => {
                 if !core.room.channel(&channel, ChannelKind::Text) {
                     return self.error(&core, ErrorCode::NotFound, "no such text channel");
                 }
                 let Some(text) = proto::clean_text(&text, proto::MAX_TEXT_CHARS) else { return };
                 let reply = reply_to.and_then(|id| core.reply_ref(id));
-                effect = self.create_op(&mut core, Body::Msg { channel, text, reply, file: None });
+                let style = style.and_then(|s| s.clean());
+                effect = self.create_op(&mut core, Body::Msg { channel, text, reply, file: None, style });
             }
 
             ClientMsg::Edit { id, text } => {
@@ -1257,7 +1258,7 @@ impl Inner {
         let reply = reply_to.and_then(|id| core.reply_ref(id));
         let image = proto::is_image_name(&name);
         let file = FileMeta { id, name, size: total, image };
-        self.create_op(&mut core, Body::Msg { channel: channel.to_string(), text, reply, file: Some(file) })?;
+        self.create_op(&mut core, Body::Msg { channel: channel.to_string(), text, reply, file: Some(file), style: None })?;
         Ok(())
     }
 

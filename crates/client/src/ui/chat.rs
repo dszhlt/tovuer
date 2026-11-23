@@ -9,6 +9,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use tovuer_proto::Message;
 
+use super::look::{Paint, look, paint_row};
 use super::text::{Markup, clip, message_lines, width};
 use super::theme::Theme;
 use super::{Hit, fill, frame, hrule, put, put_center, put_line, put_right, spinner};
@@ -21,6 +22,11 @@ use crate::transfer::{AUTO_PREVIEW_LIMIT, Thumb};
 pub struct Laid {
     sig: u64,
     lines: Vec<Line<'static>>,
+    /// The author's gradient over the text lines (`body`), applied when drawing.
+    paint: Option<Paint>,
+    body: std::ops::Range<usize>,
+    /// The widest text line — a still gradient stretches over it.
+    widest: usize,
 }
 
 /// The input grows no taller than this — beyond it the text scrolls inside.
@@ -82,9 +88,18 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) -> Option<(u16, u16)> {
         put(buf, text_x, input_area.y + 1, &clip(&hint, input_w), Style::new().fg(t.faint).bg(t.bg), input_w as u16);
     } else {
         let is_command = app.input.text().starts_with('/') && !app.input.text().starts_with("//");
-        let style = Style::new().fg(if is_command { t.info } else { t.text }).bg(t.bg);
+        // what you type already looks the way it will be sent
+        let mine = if is_command { None } else { app.settings.style.clean() };
+        let shown = look(mine.as_ref(), &t, true);
+        let style = if is_command { Style::new().fg(t.info).bg(t.bg) } else { Style::new().bg(t.bg).patch(shown.base) };
+        let widest = layout.lines.iter().map(|l| width(l)).max().unwrap_or(0);
         for (row, line) in layout.lines.iter().skip(first).take(input_lines).enumerate() {
-            put(buf, text_x, input_area.y + 1 + row as u16, line, style, input_w as u16);
+            let y = input_area.y + 1 + row as u16;
+            put(buf, text_x, y, line, style, input_w as u16);
+            if let Some(paint) = &shown.paint {
+                paint_row(buf, Rect::new(text_x, y, width(line).min(input_w) as u16, 1), paint, first + row, widest, app.frame);
+                app.ui.animating |= paint.flow;
+            }
         }
     }
     let used = app.input.text().chars().count();
@@ -205,7 +220,7 @@ fn wants_preview(app: &App, msg: &Message) -> bool {
 
 fn signature(app: &App, msg: &Message, header: bool, w: usize) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    (app.ui.generation, w, header, msg.edited, msg.text.len()).hash(&mut h);
+    (app.ui.generation, w, header, msg.edited, msg.text.len(), &msg.style, app.settings.styles).hash(&mut h);
     for r in &msg.reactions {
         (&r.emoji, r.users.len(), r.users.iter().any(|u| u == app.my_name())).hash(&mut h);
     }
@@ -223,9 +238,10 @@ fn signature(app: &App, msg: &Message, header: bool, w: usize) -> u64 {
 }
 
 /// Lay one message out in lines `w` wide.
-fn lay(app: &App, msg: &Message, header: bool, w: usize) -> Vec<Line<'static>> {
+fn lay(app: &App, msg: &Message, header: bool, w: usize) -> Laid {
     let t = &app.theme;
     let mut lines: Vec<Line<'static>> = Vec::new();
+    let (mut paint, mut body, mut widest) = (None, 0..0, 0);
     if msg.system {
         let markup = Markup { theme: t, me: "", base: Style::new().fg(t.faint).add_modifier(Modifier::ITALIC) };
         for (i, line) in message_lines(&msg.text, &markup, w.saturating_sub(2).max(1)).into_iter().enumerate() {
@@ -233,7 +249,7 @@ fn lay(app: &App, msg: &Message, header: bool, w: usize) -> Vec<Line<'static>> {
             spans.extend(line.spans);
             lines.push(Line::from(spans));
         }
-        return lines;
+        return Laid { sig: 0, lines, paint, body, widest };
     }
     if header {
         let time = local_time(msg.ts).format("%H:%M").to_string();
@@ -251,16 +267,22 @@ fn lay(app: &App, msg: &Message, header: bool, w: usize) -> Vec<Line<'static>> {
         ]));
     }
     if !msg.text.is_empty() {
-        let markup = Markup { theme: t, me: app.my_name(), base: Style::new().fg(t.text) };
-        let mut body = message_lines(&msg.text, &markup, w);
+        // the author's style, unless this reader turned styles off
+        let style = msg.style.as_ref().filter(|_| app.settings.styles > 0);
+        let shown = look(style, t, app.settings.styles == 2);
+        let markup = Markup { theme: t, me: app.my_name(), base: shown.base };
+        let mut text = message_lines(&msg.text, &markup, w);
+        widest = text.iter().map(|l| l.width()).max().unwrap_or(0);
         if msg.edited.is_some() {
             const MARK: &str = " (edited)";
-            match body.last_mut() {
+            match text.last_mut() {
                 Some(last) if last.width() + width(MARK) <= w => last.spans.push(Span::styled(MARK, Style::new().fg(t.faint))),
-                _ => body.push(Line::from(Span::styled(MARK.trim_start(), Style::new().fg(t.faint)))),
+                _ => text.push(Line::from(Span::styled(MARK.trim_start(), Style::new().fg(t.faint)))),
             }
         }
-        lines.extend(body);
+        body = lines.len()..lines.len() + text.len();
+        paint = shown.paint;
+        lines.extend(text);
     }
     if let Some(file) = &msg.file {
         let size = human_size(file.size);
@@ -304,7 +326,7 @@ fn lay(app: &App, msg: &Message, header: bool, w: usize) -> Vec<Line<'static>> {
     if lines.is_empty() {
         lines.push(Line::default());
     }
-    lines
+    Laid { sig: 0, lines, paint, body, widest }
 }
 
 fn pre_rows(ch: &ChannelState, i: usize, now: chrono::DateTime<chrono::Local>) -> Vec<Pre> {
@@ -375,8 +397,8 @@ fn messages(buf: &mut Buffer, area: Rect, app: &mut App) {
             (msg.id, signature(app, msg, header, w), header)
         };
         if app.ui.cache.get(&id).is_none_or(|laid| laid.sig != sig) {
-            let lines = lay(app, &app.channels[index].messages[i], header, w);
-            app.ui.cache.insert(id, Laid { sig, lines });
+            let laid = Laid { sig, ..lay(app, &app.channels[index].messages[i], header, w) };
+            app.ui.cache.insert(id, laid);
         }
         let pre = pre_rows(&app.channels[index], i, now).len();
         let h = pre + app.ui.cache[&id].lines.len();
@@ -423,6 +445,7 @@ fn messages(buf: &mut Buffer, area: Rect, app: &mut App) {
     let me = app.my_name().to_string();
     let first = starts.partition_point(|s| *s <= top).saturating_sub(1);
     let mut wanted = Vec::new();
+    let mut animating = false;
     for (i, start) in starts.iter().enumerate().skip(first) {
         if *start >= top + rows {
             break;
@@ -452,7 +475,7 @@ fn messages(buf: &mut Buffer, area: Rect, app: &mut App) {
             }
             row += 1;
         }
-        for line in &laid.lines {
+        for (li, line) in laid.lines.iter().enumerate() {
             if row >= top && row < top + rows {
                 let y = area.y + pad + (row - top) as u16;
                 if is_selected {
@@ -463,12 +486,20 @@ fn messages(buf: &mut Buffer, area: Rect, app: &mut App) {
                     put(buf, area.x, y, "▌", Style::new().fg(t.warn).bg(t.mention), 1);
                 }
                 put_line(buf, area.x + 2, y, line, w as u16);
+                if let Some(paint) = &laid.paint
+                    && laid.body.contains(&li)
+                {
+                    let row = Rect::new(area.x + 2, y, (line.width() as u16).min(w as u16), 1);
+                    paint_row(buf, row, paint, li - laid.body.start, laid.widest, app.frame);
+                    animating |= paint.flow;
+                }
                 app.ui.hits.push((Rect::new(area.x, y, area.width - 1, 1), Hit::Message(msg.id)));
             }
             row += 1;
         }
     }
     app.ui.want_thumbs.extend(wanted);
+    app.ui.animating |= animating;
 
     // a scrollbar only when there is something to scroll
     if total > rows {

@@ -90,6 +90,7 @@ impl App {
             KeyCode::F(1) => self.overlay = Some(Overlay::Help { scroll: 0 }),
             KeyCode::F(2) => self.open_settings(),
             KeyCode::F(3) => self.overlay = Some(Overlay::Users { sel: 0 }),
+            KeyCode::F(4) => self.open_style(),
             KeyCode::Char('k') if ctrl => self.open_palette(),
             KeyCode::Char('o') if ctrl => self.open_picker(),
             KeyCode::Char('l') if ctrl => self.overlay = Some(Overlay::Log { scroll: 0 }),
@@ -263,6 +264,8 @@ impl App {
                         "v" | "voice" => self.channels.iter().filter(|c| !c.is_text()).map(|c| c.name.clone()).collect(),
                         "mute" | "unmute" | "vol" | "kick" => self.others().iter().map(|u| u.name.clone()).collect(),
                         "denoise" | "agc" | "mouse" | "transparent" | "previews" | "sharp" => vec!["on".into(), "off".into()],
+                        "color" => std::iter::once("off").chain(super::style::COLORS.iter().map(|c| c.0)).map(str::to_string).collect(),
+                        "gradient" => std::iter::once("off").chain(super::style::GRADIENTS.iter().map(|g| g.0)).map(str::to_string).collect(),
                         _ => Vec::new(),
                     };
                     let items = values
@@ -731,8 +734,16 @@ impl App {
                 _ => true,
             },
 
+            Overlay::Style(view) => self.style_key(view, key),
+
             Overlay::Prompt(prompt) => match key.code {
-                KeyCode::Esc => false,
+                KeyCode::Esc => {
+                    // back from your own color to the style window
+                    if matches!(prompt.action, PromptAction::Color | PromptAction::Gradient) {
+                        self.overlay = Some(Overlay::Style(super::style::StyleView { sel: self.ui.style_sel }));
+                    }
+                    false
+                }
                 KeyCode::Enter => {
                     let value = prompt.input.text().trim().to_string();
                     match prompt.action.clone() {
@@ -747,6 +758,12 @@ impl App {
                         PromptAction::SaveAs(file) => {
                             let target = (!value.is_empty()).then(|| crate::settings::expand_home(&value));
                             self.save_file(file, target);
+                        }
+                        action @ (PromptAction::Color | PromptAction::Gradient) => {
+                            if !self.apply_custom(&action, &value) {
+                                self.overlay = Some(overlay);
+                                return;
+                            }
                         }
                     }
                     false
@@ -795,6 +812,8 @@ impl App {
             Setting::Transparent => on(s.transparent),
             Setting::Members => on(s.members),
             Setting::Previews => on(s.previews),
+            Setting::MyStyle => super::style::describe(&s.style),
+            Setting::Styles => ["plain", "still", "flowing"][s.styles.min(2) as usize].to_string(),
             Setting::Sharp => match &self.graphics {
                 Some(g) if s.sharp => format!("on · {}", crate::transfer::graphics_name(g.protocol_type())),
                 Some(_) => "off".into(),
@@ -843,6 +862,11 @@ impl App {
                 self.ui.invalidate();
             }
             Setting::Sharp => self.settings.sharp = !self.settings.sharp,
+            Setting::MyStyle => self.open_style(),
+            Setting::Styles => {
+                self.settings.styles = (self.settings.styles as isize + delta).rem_euclid(3) as u8;
+                self.ui.invalidate();
+            }
             Setting::Mouse => {
                 self.settings.mouse = !self.settings.mouse;
                 self.effects.push(Effect::Mouse(self.settings.mouse));

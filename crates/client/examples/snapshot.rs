@@ -3,8 +3,8 @@
 //! ```text
 //! cargo run -p tovuer --example snapshot -- <scene> [theme] [width] [height] [file.html]
 //! ```
-//! Scenes: main, voice, select, login, palette, help, settings, users, react,
-//! picker, viewer, typing, toast. Without a file name it prints the screen as text.
+//! Scenes: main, voice, select, login, palette, help, settings, style, users,
+//! react, picker, viewer, typing, toast. Without a file name it prints the screen as text.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;

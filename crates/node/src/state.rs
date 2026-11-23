@@ -262,6 +262,7 @@ impl Room {
             file: None,
             reactions: Vec::new(),
             system: true,
+            style: None,
         };
         if self.index.contains_key(&msg.id) {
             return None;
@@ -309,7 +310,7 @@ impl Room {
                 }
             }
 
-            Body::Msg { channel, text, reply, file } => {
+            Body::Msg { channel, text, reply, file, style } => {
                 let id = op.msg_id();
                 if self.deleted.contains(&id) || self.index.contains_key(&id) {
                     return (out, effect);
@@ -336,6 +337,7 @@ impl Room {
                     file,
                     reactions: Vec::new(),
                     system: false,
+                    style: style.and_then(|s| s.clean()),
                 };
                 self.insert(Entry { msg, author, edit_ts: 0, reacts: BTreeMap::new() });
                 // operations that arrived before the message itself
@@ -514,7 +516,7 @@ mod tests {
     }
 
     fn msg(channel: &str, text: &str) -> Body {
-        Body::Msg { channel: channel.into(), text: text.into(), reply: None, file: None }
+        Body::Msg { channel: channel.into(), text: text.into(), reply: None, file: None, style: None }
     }
 
     fn texts(room: &Room, channel: &str) -> Vec<String> {
@@ -725,13 +727,13 @@ mod tests {
         let mut a = Author::new(1, "dana");
         let mut room = Room::new("home");
         let file = FileMeta { id: "AB".repeat(16), name: "../../.bashrc".into(), size: 10, image: false };
-        room.apply(&a.op(1, Body::Msg { channel: "general".into(), text: String::new(), reply: None, file: Some(file) }));
+        room.apply(&a.op(1, Body::Msg { channel: "general".into(), text: String::new(), reply: None, file: Some(file), style: None }));
         let (page, _) = room.history("general", None, 10);
         let f = page[0].file.as_ref().unwrap();
         assert_eq!((f.id.as_str(), f.name.as_str()), ("ab".repeat(16).as_str(), "bashrc"));
         assert_eq!(room.file_author(&"ab".repeat(16)), Some(a.key()));
         let bad = FileMeta { id: "zz".into(), name: "x".into(), size: 1, image: false };
-        room.apply(&a.op(2, Body::Msg { channel: "general".into(), text: String::new(), reply: None, file: Some(bad) }));
+        room.apply(&a.op(2, Body::Msg { channel: "general".into(), text: String::new(), reply: None, file: Some(bad), style: None }));
         assert_eq!(room.history("general", None, 10).0.len(), 1);
     }
 }

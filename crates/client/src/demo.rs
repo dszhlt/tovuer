@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use tokio::sync::mpsc;
-use tovuer_proto::{Channel, FileMeta, Message, Reaction, ReplyRef, ServerMsg, User};
+use tovuer_proto::{Channel, FileMeta, Message, Reaction, ReplyRef, ServerMsg, TextStyle, User};
 use tovuer_voice::{Engine, StreamInfo};
 
 use crate::app::overlay::{Overlay, Picker, SettingsView, Viewer};
@@ -53,7 +53,19 @@ fn msg(id: u64, channel: &str, from: &str, minutes_ago: i64, text: &str) -> Mess
         file: None,
         reactions: Vec::new(),
         system: false,
+        style: None,
     }
+}
+
+/// A message in someone's own style.
+fn styled(style: TextStyle, m: Message) -> Message {
+    Message { style: Some(style), ..m }
+}
+
+fn gradient(name: &str) -> TextStyle {
+    let mut style = TextStyle { flow: true, ..TextStyle::default() };
+    let _ = crate::app::style::set_gradient(&mut style, name);
+    style
 }
 
 /// A stand-in picture: a sunset over the sea, drawn by a formula.
@@ -119,11 +131,11 @@ pub fn populate(app: &mut App) {
         },
         Message { edited: Some(at(40)), ..msg(7, "general", "dana", 41, "me too. by the way, there is no server now — the room lives on all of us") },
         Message { file: Some(image), ..msg(8, "general", "oleg", 30, "look what I shot yesterday") },
-        msg(9, "general", "kate", 28, "gorgeous 😍 where is that?"),
+        styled(gradient("candy"), msg(9, "general", "kate", 28, "gorgeous 😍 where is that?")),
         msg(10, "general", "oleg", 27, "by the bay, the rest goes here: https://example.com/album/2026"),
         msg(11, "general", "bob", 12, "@dana could you check why the build fails:\n```\nerror[E0599]: no method named `fit` found\n  --> src/ui/chat.rs:42:18\n```"),
     ];
-    history.push(msg(12, "general", "dana", 3, "on it, it's a typo — fixing now"));
+    history.push(styled(TextStyle { bold: true, ..gradient("aurora") }, msg(12, "general", "dana", 3, "on it, it's a typo — fixing now")));
     server(app, ServerMsg::History { before: None, channel: "general".into(), messages: history, more: false });
     server(
         app,
@@ -182,6 +194,11 @@ pub fn scene(app: &mut App, name: &str) {
         "palette" => app.open_palette(),
         "help" => app.overlay = Some(Overlay::Help { scroll: 0 }),
         "settings" => app.overlay = Some(Overlay::Settings(SettingsView { sel: 0, mics: Some(Vec::new()), spks: Some(Vec::new()) })),
+        "style" => {
+            app.settings.style = TextStyle { bold: true, ..gradient("aurora") };
+            app.open_style();
+            app.frame = 6;
+        }
         "users" => app.overlay = Some(Overlay::Users { sel: 0 }),
         "react" => app.overlay = Some(Overlay::React { msg: 9, sel: 3 }),
         "picker" => app.overlay = Some(Overlay::Picker(Picker::open(&std::env::temp_dir()))),

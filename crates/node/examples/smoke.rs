@@ -64,9 +64,9 @@ async fn main() -> anyhow::Result<()> {
         println!("  bob found alice while joining");
     }
 
-    a.send(ClientMsg::Send { channel: "general".into(), text: "hello over the internet".into(), reply_to: None });
+    a.send(ClientMsg::Send { channel: "general".into(), text: "hello over the internet".into(), reply_to: None, style: None });
     wait(&mut b_rx, "message alice → bob", Duration::from_secs(30), |m| matches!(m, ServerMsg::Msg { msg } if msg.text == "hello over the internet")).await?;
-    b.send(ClientMsg::Send { channel: "general".into(), text: "hi back".into(), reply_to: None });
+    b.send(ClientMsg::Send { channel: "general".into(), text: "hi back".into(), reply_to: None, style: None });
     wait(&mut a_rx, "message bob → alice", Duration::from_secs(30), |m| matches!(m, ServerMsg::Msg { msg } if msg.text == "hi back")).await?;
 
     let started = Instant::now();

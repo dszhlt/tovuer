@@ -524,6 +524,9 @@ impl App {
         let now = Instant::now();
         self.frame = self.frame.wrapping_add(1);
 
+        if self.ui.animating {
+            self.dirty = true;
+        }
         let before = self.toasts.len();
         self.toasts.retain(|t| t.until > now);
         if self.toasts.len() != before {

@@ -108,6 +108,76 @@ pub struct Message {
     /// A service line (a channel was created and so on).
     #[serde(default, skip_serializing_if = "is_false")]
     pub system: bool,
+    /// How the author wants their text to look.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<TextStyle>,
+}
+
+/// How someone's messages look: one color or a (moving) gradient, plus
+/// markup for the whole text. The author picks it; everyone sees it.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[serde(default)]
+pub struct TextStyle {
+    /// One color for the text, `#rrggbb`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// 2–4 colors (`#rrggbb`) the text runs through; wins over `color`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub gradient: Vec<String>,
+    /// The gradient keeps flowing along the text.
+    #[serde(skip_serializing_if = "is_false")]
+    pub flow: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub bold: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub italic: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub strike: bool,
+    /// The whole text looks like `code`.
+    #[serde(skip_serializing_if = "is_false")]
+    pub code: bool,
+}
+
+pub const MAX_GRADIENT_STOPS: usize = 4;
+
+impl TextStyle {
+    /// Only well-formed parts are kept; `None` if nothing is left.
+    pub fn clean(&self) -> Option<TextStyle> {
+        let color = self.color.as_deref().and_then(parse_color).map(color_hex);
+        let mut gradient: Vec<String> = self.gradient.iter().filter_map(|c| parse_color(c)).map(color_hex).take(MAX_GRADIENT_STOPS).collect();
+        if gradient.len() < 2 {
+            gradient.clear();
+        }
+        let style = TextStyle {
+            color: if gradient.is_empty() { color } else { None },
+            flow: self.flow && !gradient.is_empty(),
+            gradient,
+            bold: self.bold,
+            italic: self.italic,
+            strike: self.strike,
+            code: self.code,
+        };
+        (style != TextStyle::default()).then_some(style)
+    }
+}
+
+/// `#rrggbb`, `rrggbb` or `#rgb` → RGB.
+pub fn parse_color(s: &str) -> Option<[u8; 3]> {
+    let hex = s.trim().strip_prefix('#').unwrap_or(s.trim());
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let digit = |i: usize, len: usize| u8::from_str_radix(&hex[i..i + len], 16).ok();
+    match hex.len() {
+        6 => Some([digit(0, 2)?, digit(2, 2)?, digit(4, 2)?]),
+        3 => Some([digit(0, 1)? * 17, digit(1, 1)? * 17, digit(2, 1)? * 17]),
+        _ => None,
+    }
+}
+
+/// RGB → `#rrggbb`.
+pub fn color_hex(c: [u8; 3]) -> String {
+    format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])
 }
 
 /// Interface → node.
@@ -119,6 +189,8 @@ pub enum ClientMsg {
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reply_to: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<TextStyle>,
     },
     Edit {
         id: u64,
@@ -390,7 +462,7 @@ mod tests {
 
     #[test]
     fn client_msg_wire_format_is_tagged() {
-        let m = ClientMsg::Send { channel: "general".into(), text: "hi".into(), reply_to: None };
+        let m = ClientMsg::Send { channel: "general".into(), text: "hi".into(), reply_to: None, style: None };
         let s = serde_json::to_string(&m).unwrap();
         assert_eq!(s, r#"{"t":"send","channel":"general","text":"hi"}"#);
         assert_eq!(serde_json::from_str::<ClientMsg>(&s).unwrap(), m);
@@ -413,9 +485,36 @@ mod tests {
             file: Some(FileMeta { id: "ab".into(), name: "pic.png".into(), size: 10, image: true }),
             reactions: vec![Reaction { emoji: "🔥".into(), users: vec!["dana".into()] }],
             system: false,
+            style: Some(TextStyle { gradient: vec!["#ff0000".into(), "#0000ff".into()], flow: true, bold: true, ..TextStyle::default() }),
         };
         let s = serde_json::to_string(&ServerMsg::Msg { msg: msg.clone() }).unwrap();
         assert_eq!(serde_json::from_str::<ServerMsg>(&s).unwrap(), ServerMsg::Msg { msg });
+    }
+
+    #[test]
+    fn text_styles_keep_only_what_is_valid() {
+        assert_eq!(parse_color("#FF8800"), Some([255, 136, 0]));
+        assert_eq!(parse_color("f80"), Some([255, 136, 0]));
+        assert_eq!(parse_color("#ff880"), None);
+        assert_eq!(parse_color("#gg0000"), None);
+        assert_eq!(TextStyle::default().clean(), None, "plain is no style at all");
+        let messy = TextStyle {
+            color: Some("#ABC".into()),
+            gradient: vec!["red".into(), "#00ff00".into()],
+            flow: true,
+            italic: true,
+            ..TextStyle::default()
+        };
+        // one valid stop is not a gradient: the color stays, flowing needs a gradient
+        assert_eq!(messy.clean(), Some(TextStyle { color: Some("#aabbcc".into()), italic: true, ..TextStyle::default() }));
+        let many = TextStyle { color: Some("#ffffff".into()), gradient: vec!["#111111".into(); 9], flow: true, ..TextStyle::default() };
+        let clean = many.clean().unwrap();
+        assert_eq!((clean.gradient.len(), clean.color, clean.flow), (MAX_GRADIENT_STOPS, None, true), "a gradient wins over a color");
+        // an old message has no style; an unknown field from a newer client is ignored
+        let old: Message = serde_json::from_str(r#"{"id":1,"channel":"g","from":"a","ts":1,"text":"hi"}"#).unwrap();
+        assert_eq!(old.style, None);
+        let newer: TextStyle = serde_json::from_str(r#"{"bold":true,"sparkle":3}"#).unwrap();
+        assert!(newer.bold);
     }
 
     #[test]

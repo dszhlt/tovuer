@@ -119,7 +119,7 @@ Everything that changes the room is an **operation**, signed by its author:
 | `body.t` | Fields | Who may | Meaning |
 |---|---|---|---|
 | `genesis` | `name` | anyone | creates the room; the author of the **earliest** genesis owns it |
-| `msg` | `channel`, `text?`, `reply?`, `file?` | anyone | a message |
+| `msg` | `channel`, `text?`, `reply?`, `file?`, `style?` | anyone | a message |
 | `edit` | `id`, `text` | the author | last write wins |
 | `delete` | `id` | the author or the owner | |
 | `react` | `id`, `emoji`, `on` | anyone | per person and emoji, last write wins |
@@ -127,6 +127,17 @@ Everything that changes the room is an **operation**, signed by its author:
 | `channel_topic` | `name`, `topic` | anyone | last write wins |
 | `channel_delete` | `name` | the owner | |
 | `ban` | `key`, `name` | the owner | peers stop talking to that key and ignore its newer operations |
+
+`style` is how the author wants the text to look; readers draw what they
+understand of it and ignore the rest:
+
+```json
+{"color": "#ff8800", "gradient": ["#f72585", "#7209b7", "#4cc9f0"], "flow": true,
+ "bold": true, "italic": false, "strike": false, "code": false}
+```
+
+`gradient` (2–4 colors) wins over `color`; `flow` makes it run along the
+text. Every field is optional, and invalid colors are dropped.
 
 Every peer folds the same operations into the same room. Operations on a
 message that has not arrived yet wait for it; a delete that arrives first

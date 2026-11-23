@@ -13,6 +13,7 @@ use crate::app::commands::COMMANDS;
 use crate::app::emoji::QUICK;
 use crate::app::input::Input;
 use crate::app::overlay::{Confirm, Overlay, Palette, Peek, Picker, Prompt, Setting, SettingsView, Viewer};
+use crate::app::style::{StyleRow, StyleView, color_name, gradient_name};
 use crate::app::{App, Conn, LoginField};
 use crate::settings::human_size;
 use crate::transfer::Thumb;
@@ -207,6 +208,10 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) -> Option<(u16, u16)> {
             settings(buf, area, app, view);
             None
         }
+        Overlay::Style(view) => {
+            style_window(buf, area, app, view);
+            None
+        }
         Overlay::Picker(picker) => {
             picker_window(buf, area, app, picker);
             None
@@ -270,7 +275,7 @@ fn help_lines(t: &Theme, w: usize) -> Vec<Line<'static>> {
         row("Alt+1…9", "text channel by number"),
         row("PgUp / PgDn", "scroll the feed · Ctrl+End — to the latest"),
         row("Ctrl+O", "send a file (or drop a file into the window)"),
-        row("F2 · F3", "settings · peer volumes"),
+        row("F2 · F3 · F4", "settings · peer volumes · your message style"),
         row("Ctrl+L", "system log"),
         row("Ctrl+Q", "quit"),
         Line::default(),
@@ -462,6 +467,99 @@ fn settings(buf: &mut Buffer, area: Rect, app: &mut App, view: &mut SettingsView
         put(buf, inner.x, help_y + 1, "the microphone level shows in a voice channel and during the mic test", Style::new().fg(t.faint).bg(t.raised), inner.width);
     }
     footer(buf, boxed, "↑↓ — pick · ←→ / Enter — change · Esc — close", &t);
+}
+
+/// What the style window shows as an example.
+const STYLE_SAMPLE: &str = "hey! this is how my messages look now — with a link https://example.com and `code` too";
+
+fn style_window(buf: &mut Buffer, area: Rect, app: &mut App, view: &mut StyleView) {
+    let t = app.theme.clone();
+    let rows = StyleRow::ALL.len() as u16;
+    let boxed = centered(area, area.width.saturating_sub(4).min(72), (rows + 8).min(area.height.saturating_sub(2)));
+    let inner = window(buf, boxed, "Your message style", &t);
+    view.sel = view.sel.min(StyleRow::ALL.len() - 1);
+    let style = app.settings.style.clean();
+
+    // the preview: your next message, the way everyone will see it
+    let me = app.my_name().to_string();
+    let nick = if me.is_empty() { "you".to_string() } else { me };
+    let x = put(buf, inner.x + 1, inner.y, &nick, Style::new().fg(t.nick(&nick)).bg(t.raised).add_modifier(Modifier::BOLD), inner.width);
+    put(buf, x + 2, inner.y, "now", Style::new().fg(t.faint).bg(t.raised), 3);
+    let shown = super::look::look(style.as_ref(), &t, true);
+    let markup = super::text::Markup { theme: &t, me: "", base: shown.base.bg(shown.base.bg.unwrap_or(t.raised)) };
+    let text_w = inner.width.saturating_sub(2);
+    let lines = super::text::message_lines(STYLE_SAMPLE, &markup, text_w as usize);
+    let widest = lines.iter().map(|l| l.width()).max().unwrap_or(0);
+    for (i, line) in lines.iter().take(2).enumerate() {
+        let y = inner.y + 1 + i as u16;
+        put_line(buf, inner.x + 1, y, line, text_w);
+        if let Some(paint) = &shown.paint {
+            super::look::paint_row(buf, Rect::new(inner.x + 1, y, (line.width() as u16).min(text_w), 1), paint, i, widest, app.frame);
+            app.ui.animating |= paint.flow;
+        }
+    }
+    let list_y = inner.y + 4;
+    super::hrule(buf, inner.x, list_y - 1, inner.width, Style::new().fg(t.line).bg(t.raised));
+
+    let s = &app.settings.style;
+    let has_gradient = s.gradient.len() >= 2;
+    for (i, row) in StyleRow::ALL.iter().enumerate() {
+        let y = list_y + i as u16;
+        if y + 3 > inner.bottom() {
+            break;
+        }
+        let selected = i == view.sel;
+        let bg = if selected { t.sel } else { t.raised };
+        fill(buf, Rect::new(boxed.x + 1, y, boxed.width - 2, 1), Style::new().bg(bg));
+        // the markup rows show their own effect
+        let mut label = Style::new().fg(if selected { t.text } else { t.dim }).bg(bg);
+        label = match row {
+            StyleRow::Bold => label.add_modifier(Modifier::BOLD),
+            StyleRow::Italic => label.add_modifier(Modifier::ITALIC),
+            StyleRow::Strike => label.add_modifier(Modifier::CROSSED_OUT),
+            StyleRow::Code => label.fg(t.warn),
+            _ if selected => label.add_modifier(Modifier::BOLD),
+            _ => label,
+        };
+        put(buf, inner.x + 1, y, row.label(), label, inner.width / 2);
+
+        let on = |b: bool| if b { ("on", t.ok) } else { ("off", t.faint) };
+        let (value, color) = match row {
+            StyleRow::Color if has_gradient && s.color.is_some() => (format!("{} · hidden", color_name(s)), t.faint),
+            StyleRow::Color if has_gradient => ("default".to_string(), t.faint),
+            StyleRow::Color => (color_name(s), t.accent),
+            StyleRow::Gradient => (gradient_name(s), if has_gradient { t.accent } else { t.faint }),
+            StyleRow::Flow if !has_gradient => ("needs a gradient".to_string(), t.faint),
+            StyleRow::Flow => (on(s.flow).0.to_string(), on(s.flow).1),
+            StyleRow::Bold => (on(s.bold).0.to_string(), on(s.bold).1),
+            StyleRow::Italic => (on(s.italic).0.to_string(), on(s.italic).1),
+            StyleRow::Strike => (on(s.strike).0.to_string(), on(s.strike).1),
+            StyleRow::Code => (on(s.code).0.to_string(), on(s.code).1),
+            StyleRow::Reset => ("Enter".to_string(), t.faint),
+        };
+        let value = clip(&value, (inner.width as usize / 2).saturating_sub(10).max(6));
+        let value = if selected && *row != StyleRow::Reset { format!("‹ {value} ›") } else { format!("  {value}  ") };
+        let right = put_right(buf, inner.right(), y, &value, Style::new().fg(color).bg(bg), inner.x + 8);
+        // a swatch of the color or the gradient in front of the value
+        let swatch: Vec<[u8; 3]> = match row {
+            StyleRow::Color if !has_gradient => s.color.as_deref().and_then(tovuer_proto::parse_color).map(|c| vec![super::look::readable(&t, c); 4]).unwrap_or_default(),
+            StyleRow::Gradient if has_gradient => {
+                let stops: Vec<[u8; 3]> = s.gradient.iter().filter_map(|c| tovuer_proto::parse_color(c)).map(|c| super::look::readable(&t, c)).collect();
+                (0..8).map(|k| super::look::sample(&stops, k as f32 / 7.0, false)).collect()
+            }
+            _ => Vec::new(),
+        };
+        let start = right.saturating_sub(swatch.len() as u16 + 1);
+        for (k, c) in swatch.iter().enumerate() {
+            put(buf, start + k as u16, y, "█", Style::new().fg(Color::Rgb(c[0], c[1], c[2])).bg(bg), 1);
+        }
+    }
+
+    let row = StyleRow::ALL[view.sel];
+    let help_y = inner.bottom() - 1;
+    super::hrule(buf, inner.x, help_y - 1, inner.width, Style::new().fg(t.line).bg(t.raised));
+    put(buf, inner.x, help_y, &clip(row.help(), inner.width as usize), Style::new().fg(t.dim).bg(t.raised), inner.width);
+    footer(buf, boxed, "↑↓ — pick · ←→ — change · Enter — your own · Esc", &t);
 }
 
 /// Draw a picture from half blocks, centered in `area`.

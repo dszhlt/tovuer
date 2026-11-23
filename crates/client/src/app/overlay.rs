@@ -24,6 +24,8 @@ pub enum Overlay {
     React { msg: u64, sel: usize },
     Confirm(Confirm),
     Prompt(Prompt),
+    /// Your message style (F4).
+    Style(super::style::StyleView),
 }
 
 // ------------------------------------------------------------ command palette
@@ -38,6 +40,7 @@ pub enum Cmd {
     Deafen,
     Upload,
     Settings,
+    Style,
     Users,
     Theme(String),
     NewChannel(ChannelKind),
@@ -137,6 +140,8 @@ pub enum Setting {
     Members,
     Previews,
     Sharp,
+    MyStyle,
+    Styles,
     Mouse,
     Mic,
     Spk,
@@ -154,12 +159,14 @@ pub enum Setting {
 }
 
 impl Setting {
-    pub const ALL: [Setting; 19] = [
+    pub const ALL: [Setting; 21] = [
         Setting::Theme,
         Setting::Transparent,
         Setting::Members,
         Setting::Previews,
         Setting::Sharp,
+        Setting::MyStyle,
+        Setting::Styles,
         Setting::Mouse,
         Setting::Mic,
         Setting::Spk,
@@ -194,6 +201,8 @@ impl Setting {
             Setting::Members => "Online panel",
             Setting::Previews => "Picture previews in chat",
             Setting::Sharp => "Sharp pictures",
+            Setting::MyStyle => "Your message style",
+            Setting::Styles => "Styles of others",
             Setting::Mouse => "Mouse",
             Setting::Mic => "Microphone",
             Setting::Spk => "Speakers",
@@ -218,6 +227,8 @@ impl Setting {
             Setting::Members => "the member list on the right (always hidden in narrow windows)",
             Setting::Previews => "show thumbnails of shared pictures",
             Setting::Sharp => "the viewer draws real pixels (sixel/kitty) if the terminal can; o there opens the original",
+            Setting::MyStyle => "Enter — color, a flowing gradient, bold / italic / strike / code for all you write (F4)",
+            Setting::Styles => "how colors and gradients others picked show for you: flowing, still, or plain text",
             Setting::Mouse => "wheel and clicks; selecting text then needs Shift",
             Setting::Mic | Setting::Spk => "← → pick a device; “system default” follows the OS settings",
             Setting::Denoise => "removes room noise, fans and keyboard clatter",
@@ -427,6 +438,10 @@ pub enum PromptAction {
     NewChannel(ChannelKind),
     Topic(String),
     SaveAs(FileMeta),
+    /// Your own message color.
+    Color,
+    /// Your own gradient.
+    Gradient,
 }
 
 pub struct Prompt {

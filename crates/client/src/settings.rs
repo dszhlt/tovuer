@@ -46,6 +46,10 @@ pub struct Settings {
     pub previews: bool,
     /// The picture viewer uses the terminal's own graphics (Sixel, Kitty), if it has them.
     pub sharp: bool,
+    /// How your messages look to everyone.
+    pub style: tovuer_proto::TextStyle,
+    /// Message styles of others: 2 — as chosen (gradients flow), 1 — still, 0 — plain text.
+    pub styles: u8,
     /// The online panel on the right.
     pub members: bool,
     pub mouse: bool,
@@ -76,6 +80,9 @@ impl Default for Settings {
             notify_all: false,
             previews: true,
             sharp: true,
+            // a gradient, once picked, flows unless switched off
+            style: tovuer_proto::TextStyle { flow: true, ..Default::default() },
+            styles: 2,
             members: true,
             mouse: false,
             quick_keys: true,

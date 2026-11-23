@@ -132,7 +132,7 @@ impl Peer {
     }
 
     fn say(&self, text: &str) {
-        self.node.send(ClientMsg::Send { channel: "general".into(), text: text.into(), reply_to: None });
+        self.node.send(ClientMsg::Send { channel: "general".into(), text: text.into(), reply_to: None, style: None });
     }
 }
 
@@ -154,9 +154,18 @@ async fn chat_between_peers_and_history_for_latecomers() {
     let mine = dana.message("hi bob").await;
     assert_eq!(mine.id, got.id, "everyone sees the same id");
 
-    bob.node.send(ClientMsg::Send { channel: "general".into(), text: "hey".into(), reply_to: Some(got.id) });
+    // a reply, in bob's own style: it reaches dana as he chose it (cleaned up)
+    let style = tovuer_proto::TextStyle {
+        gradient: vec!["#FF0000".into(), "#0000ff".into(), "nonsense".into()],
+        flow: true,
+        bold: true,
+        ..Default::default()
+    };
+    bob.node.send(ClientMsg::Send { channel: "general".into(), text: "hey".into(), reply_to: Some(got.id), style: Some(style) });
     let reply = dana.message("hey").await;
     assert_eq!(reply.reply.as_ref().map(|r| r.text.as_str()), Some("hi bob"));
+    let seen = reply.style.expect("the style travels with the message");
+    assert_eq!((seen.gradient, seen.flow, seen.bold), (vec!["#ff0000".to_string(), "#0000ff".to_string()], true, true));
 
     bob.node.send(ClientMsg::React { id: got.id, emoji: "🔥".into() });
     match dana.server(|m| matches!(m, ServerMsg::MsgReact { .. })).await {

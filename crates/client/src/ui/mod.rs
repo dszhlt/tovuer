@@ -2,6 +2,7 @@
 //! drawing primitives and the main screen layout live here too.
 
 pub mod chat;
+pub mod look;
 pub mod overlays;
 pub mod sidebar;
 pub mod text;
@@ -54,6 +55,10 @@ pub struct UiState {
     pub repaint: bool,
     /// A Sixel/iTerm2 picture was drawn in this frame.
     pub fragile_now: bool,
+    /// A flowing gradient is on screen: redraw on every tick.
+    pub animating: bool,
+    /// The style window's row while a prompt for a custom color is open.
+    pub style_sel: usize,
     /// The file picker's last folder.
     pub last_dir: Option<PathBuf>,
     /// The window is too narrow — the channel list is hidden.
@@ -223,6 +228,7 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &mut App) -> Option<(u16, u16)>
     fill(buf, area, Style::new().fg(t.text).bg(t.bg));
     app.ui.hits.clear();
     app.ui.fragile_now = false;
+    app.ui.animating = false;
     if area.width < 40 || area.height < 12 {
         let style = Style::new().fg(t.dim);
         put_center(buf, area, area.y + area.height / 2, "the window is too small", style);
