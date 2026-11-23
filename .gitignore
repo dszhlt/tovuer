@@ -1,0 +1,6 @@
+/target
+# builds for friends (./run.sh friend / release)
+/tovuer-friend
+/tovuer-friend.exe
+# snapshots made by hand
+*.html

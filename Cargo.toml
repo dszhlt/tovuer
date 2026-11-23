@@ -1,0 +1,37 @@
+[workspace]
+resolver = "3"
+members = ["crates/proto", "crates/voice", "crates/node", "crates/client"]
+
+[workspace.package]
+version = "2.0.0"
+edition = "2024"
+rust-version = "1.91"
+license = "MIT"
+description = "tovuer — voice and text chat right in the terminal, peer to peer"
+
+[workspace.dependencies]
+tovuer-proto = { path = "crates/proto" }
+tovuer-voice = { path = "crates/voice" }
+tovuer-node = { path = "crates/node" }
+
+anyhow = "1"
+bytes = "1"
+clap = { version = "4", features = ["derive", "env"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "fs", "io-util", "signal"] }
+
+# Debug builds: unoptimized dependencies (Opus, RNNoise, image decoders) cannot
+# keep up in real time — they get their own opt-level.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true

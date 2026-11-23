@@ -1,0 +1,13 @@
+[package]
+name = "tovuer-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "tovuer protocol types: chat messages, channels, users and the binary voice frame"
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
