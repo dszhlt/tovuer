@@ -228,6 +228,7 @@ cargo run -p tovuer --example snapshot -- main nord 120 36 shot.html   # the sam
 ./scripts/screenshots.sh                             # the README screenshots (needs chromium and ImageMagick)
 TOVUER_DEBUG=1 tovuer                                # node diagnostics in ~/.cache/tovuer/stderr.log
 TOVUER_GRAPHICS=off tovuer                           # pictures as blocks (or force sixel / kitty / iterm2)
+TOVUER_ICONS=emoji tovuer                            # emoji voice icons even with a Nerd Font (or force nerd)
 ```
 
 Scenes for `snapshot`: `main`, `voice`, `select`, `login`, `palette`, `help`,

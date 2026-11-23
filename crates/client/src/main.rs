@@ -222,6 +222,7 @@ async fn run(args: Args) -> anyhow::Result<Option<PathBuf>> {
         app.settings.spk = spk;
     }
 
+    app.icons = tovuer::ui::icons::Icons::detect();
     let mut tui = Tui::enter(app.settings.mouse, &paths.cache)?;
     // asking the terminal which graphics it has must happen before input is read
     app.graphics = transfer::detect_graphics();

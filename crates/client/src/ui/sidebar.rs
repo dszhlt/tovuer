@@ -105,7 +105,7 @@ pub fn channels(buf: &mut Buffer, area: Rect, app: &mut App) {
                 if open || joined {
                     put(buf, x, y, "▎", Style::new().fg(if joined { t.ok } else { t.accent }).bg(bg), 1);
                 }
-                let icon = if ch.is_text() { "# " } else { "🔊 " };
+                let icon = if ch.is_text() { "# " } else { app.icons.voice_channel() };
                 let mut right = x + w;
                 if ch.mentions > 0 {
                     let pill = format!(" @{} ", ch.mentions);
@@ -138,7 +138,7 @@ pub fn channels(buf: &mut Buffer, area: Rect, app: &mut App) {
                 let tail = if user.deafened {
                     Some(("🔕".to_string(), t.err))
                 } else if user.muted {
-                    Some(("🔇".to_string(), t.err))
+                    Some((app.icons.muted().to_string(), t.err))
                 } else if speaking {
                     let level = if *id == my_id { app.engine.controls().mic_level() } else { app.engine.peer_level(*id) };
                     let bars = if level > 0.002 { level_bars(level) } else { wave_bars(app.frame, *id) };
@@ -186,7 +186,7 @@ fn voice_dock(buf: &mut Buffer, area: Rect, app: &App) {
     let time = clock(session.since.elapsed());
     let right = put_right(buf, x + w - 1, area.y, &time, Style::new().fg(t.faint).bg(bg), x + 6);
     let room = right.saturating_sub(x + 4 + 1) as usize;
-    put(buf, x + 1, area.y, "🔊", Style::new().bg(bg), 2);
+    put(buf, x + 1, area.y, app.icons.voice(), Style::new().fg(t.ok).bg(bg), 2);
     put(buf, x + 4, area.y, &text::clip(&session.channel, room), Style::new().fg(t.ok).bg(bg).add_modifier(Modifier::BOLD), room as u16);
 
     // line 2: the microphone level and state
@@ -243,19 +243,19 @@ pub fn members(buf: &mut Buffer, area: Rect, app: &App) {
         let speaking = app.speaking.contains(&user.id) && !user.muted;
         put(buf, x + 1, y, if speaking { "◉" } else { "●" }, Style::new().fg(if speaking { t.ok } else { t.nick(&user.name) }).bg(t.panel), 1);
         let icon = if user.deafened {
-            Some("🔕")
+            Some(("🔕", t.err))
         } else if user.muted && user.voice.is_some() {
-            Some("🔇")
+            Some((app.icons.muted(), t.err))
         } else if user.voice.is_some() {
-            Some("🔊")
+            Some((app.icons.voice(), t.dim))
         } else if user.admin {
-            Some("👑")
+            Some(("👑", t.dim))
         } else {
             None
         };
         let mut right = x + w;
-        if let Some(icon) = icon {
-            right = put_right(buf, right - 1, y, icon, Style::new().bg(t.panel), x + 4);
+        if let Some((icon, color)) = icon {
+            right = put_right(buf, right - 1, y, icon, Style::new().fg(color).bg(t.panel), x + 4);
         }
         let mut style = Style::new().fg(if user.id == my_id { t.text } else { t.dim }).bg(t.panel);
         if user.id == my_id {

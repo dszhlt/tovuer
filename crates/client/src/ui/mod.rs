@@ -2,6 +2,7 @@
 //! drawing primitives and the main screen layout live here too.
 
 pub mod chat;
+pub mod icons;
 pub mod look;
 pub mod overlays;
 pub mod sidebar;

@@ -72,6 +72,11 @@ fn html(buf: &Buffer, cursor: Option<(u16, u16)>) -> String {
             if !deco.is_empty() {
                 style.push_str(&format!(";text-decoration:{}", deco.join(" ")));
             }
+            // a Nerd Font icon may draw over the space after it, as terminals let it
+            let icon = symbol.chars().any(|c| matches!(c as u32, 0xE000..=0xF8FF | 0xF0000..=0xFFFFD));
+            if icon && x + 1 < area.width && buf[(x + 1, y)].symbol() == " " {
+                style.push_str(";overflow:visible;position:relative;z-index:1");
+            }
             out.push_str(&format!("<span style=\"{style}\">{}</span>", escape(symbol)));
             x += w;
         }
@@ -112,6 +117,10 @@ fn main() {
     app.settings.theme = theme.trim_end_matches("+clear").to_string();
     app.settings.transparent = theme.ends_with("+clear");
     app.refresh_theme();
+    // emoji unless asked: the pictures should not depend on the fonts installed
+    if std::env::var("TOVUER_ICONS").as_deref() == Ok("nerd") {
+        app.icons = tovuer::ui::icons::Icons::Nerd;
+    }
     demo::scene(&mut app, &scene);
 
     let area = Rect::new(0, 0, width, height);
