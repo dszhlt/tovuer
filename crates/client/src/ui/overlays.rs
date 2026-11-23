@@ -6,6 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
+use super::icons::{Icon, Icons};
 use super::text::{clip, clip_left, width, wrap};
 use super::theme::{Theme, blend};
 use super::{centered, fill, frame, meter, put, put_center, put_line, put_right, spinner, tone_color};
@@ -458,7 +459,7 @@ fn settings(buf: &mut Buffer, area: Rect, app: &mut App, view: &mut SettingsView
     put(buf, inner.x, help_y, &clip(which.help(), inner.width as usize), Style::new().fg(t.dim).bg(t.raised), inner.width);
     if app.engine.running() {
         let level = (app.engine.controls().mic_level() * 4.0).min(1.0);
-        let x = put(buf, inner.x, help_y + 1, "🎤 ", Style::new().bg(t.raised), 3);
+        let x = put(buf, inner.x, help_y + 1, &app.icons.spaced(Icon::Mic), Style::new().fg(t.dim).bg(t.raised), 3);
         let bar_w = inner.width.saturating_sub(4).min(30);
         meter(buf, x, help_y + 1, bar_w, level, Style::new().fg(t.level(level)).bg(t.raised), Style::new().fg(t.line).bg(t.raised));
         let state = if app.engine.monitor() { "test: speak and hear yourself" } else { "microphone now" };
@@ -575,14 +576,14 @@ fn paint_thumb(buf: &mut Buffer, area: Rect, thumb: &Thumb) {
     }
 }
 
-fn file_icon(name: &str, dir: bool) -> &'static str {
-    if dir {
-        "📁"
+fn file_icon(icons: Icons, name: &str, dir: bool) -> &'static str {
+    icons.get(if dir {
+        Icon::Folder
     } else if tovuer_proto::is_image_name(name) {
-        "📷"
+        Icon::Picture
     } else {
-        "📄"
-    }
+        Icon::File
+    })
 }
 
 fn picker_window(buf: &mut Buffer, area: Rect, app: &mut App, picker: &mut Picker) {
@@ -600,7 +601,7 @@ fn picker_window(buf: &mut Buffer, area: Rect, app: &mut App, picker: &mut Picke
         let hint = if picker.hidden { "type to filter · hidden files shown" } else { "type to filter" };
         put(buf, inner.x, filter_y, hint, Style::new().fg(t.faint).bg(t.raised), inner.width);
     } else {
-        let x = put(buf, inner.x, filter_y, "🔍 ", Style::new().bg(t.raised), 3);
+        let x = put(buf, inner.x, filter_y, &app.icons.spaced(Icon::Search), Style::new().fg(t.dim).bg(t.raised), 3);
         put(buf, x, filter_y, &picker.filter, Style::new().fg(t.accent).bg(t.raised).add_modifier(Modifier::BOLD), inner.width - 3);
     }
 
@@ -627,7 +628,7 @@ fn picker_window(buf: &mut Buffer, area: Rect, app: &mut App, picker: &mut Picke
         if selected {
             style = style.add_modifier(Modifier::BOLD);
         }
-        put(buf, list.x, y, file_icon(&entry.name, entry.dir), Style::new().bg(bg), 2);
+        put(buf, list.x, y, file_icon(app.icons, &entry.name, entry.dir), Style::new().fg(color).bg(bg), 2);
         let meta = if entry.dir {
             String::new()
         } else {

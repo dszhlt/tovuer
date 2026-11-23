@@ -9,6 +9,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use tovuer_proto::Message;
 
+use super::icons::{Icon, Icons};
 use super::look::{Paint, look, paint_row};
 use super::text::{Markup, clip, message_lines, width};
 use super::theme::Theme;
@@ -72,7 +73,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) -> Option<(u16, u16)> {
     messages(buf, msgs, app);
     typing_line(buf, Rect::new(area.x, typing_y, area.width, 1), app);
     if let Some(compose) = &app.compose {
-        compose_bar(buf, Rect::new(area.x + 1, compose_y, area.width - 2, 1), compose, &t);
+        compose_bar(buf, Rect::new(area.x + 1, compose_y, area.width - 2, 1), compose, &t, app.icons);
     }
 
     // the input
@@ -143,7 +144,7 @@ fn typing_line(buf: &mut Buffer, area: Rect, app: &App) {
     put(buf, area.x + 2, area.y, &clip(&format!("{who}{dots}"), room), Style::new().fg(t.dim).bg(t.bg).add_modifier(Modifier::ITALIC), room as u16);
 }
 
-fn compose_bar(buf: &mut Buffer, area: Rect, compose: &Compose, t: &Theme) {
+fn compose_bar(buf: &mut Buffer, area: Rect, compose: &Compose, t: &Theme, icons: Icons) {
     fill(buf, area, Style::new().fg(t.dim).bg(t.raised));
     let right = put_right(buf, area.right() - 1, area.y, "Esc — cancel", Style::new().fg(t.faint).bg(t.raised), area.x + 4);
     let room = right.saturating_sub(area.x + 2) as usize;
@@ -155,7 +156,7 @@ fn compose_bar(buf: &mut Buffer, area: Rect, compose: &Compose, t: &Theme) {
             put(buf, x, area.y, &clip(&format!(": {preview}"), left), Style::new().fg(t.dim).bg(t.raised), left as u16);
         }
         Compose::Edit { .. } => {
-            let x = put(buf, area.x + 1, area.y, "✎ ", Style::new().fg(t.warn).bg(t.raised), 2);
+            let x = put(buf, area.x + 1, area.y, &icons.spaced(Icon::Edit), Style::new().fg(t.warn).bg(t.raised), 3);
             put(buf, x, area.y, &clip("editing a message — Enter saves", room), Style::new().fg(t.dim).bg(t.raised), room as u16);
         }
     }
@@ -288,7 +289,7 @@ fn lay(app: &App, msg: &Message, header: bool, w: usize) -> Laid {
         let size = human_size(file.size);
         let room = w.saturating_sub(width(&size) + 6).max(4);
         lines.push(Line::from(vec![
-            Span::raw(if file.image { "📷 " } else { "📎 " }),
+            Span::styled(app.icons.spaced(if file.image { Icon::Picture } else { Icon::Attachment }), Style::new().fg(t.dim)),
             Span::styled(clip(&file.name, room), Style::new().fg(t.info).add_modifier(Modifier::UNDERLINED)),
             Span::styled(format!("  {size}"), Style::new().fg(t.faint)),
         ]));
@@ -297,7 +298,7 @@ fn lay(app: &App, msg: &Message, header: bool, w: usize) -> Laid {
                 Some(ThumbState::Ready(thumb)) if thumb.w as usize <= w => lines.extend(thumb_lines(thumb)),
                 Some(ThumbState::Ready(_)) | Some(ThumbState::Failed) => {}
                 Some(ThumbState::Loading) | None => {
-                    lines.push(Line::from(Span::styled("⏳ loading the preview…", Style::new().fg(t.faint))));
+                    lines.push(Line::from(Span::styled(format!("{}loading the preview…", app.icons.spaced(Icon::Loading)), Style::new().fg(t.faint))));
                 }
             }
         }

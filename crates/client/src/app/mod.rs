@@ -22,6 +22,7 @@ use self::input::Input;
 use self::model::ChannelState;
 use self::overlay::{Action, Cmd, Confirm, ConfirmAction, Overlay, Palette, Picker, Prompt, PromptAction, Viewer};
 use crate::net::{NetConfig, NetHandle};
+use crate::ui::icons::Icon;
 use crate::settings::{Paths, Settings, State};
 use crate::transfer::{Events, Remote, TaskEvent, Thumb};
 use crate::ui::UiState;
@@ -1214,7 +1215,7 @@ impl App {
             actions.push(act("#", format!("Go to #{}", ch.name), &hint, Cmd::Channel(ch.name.clone())));
         }
         if self.voice.is_some() {
-            actions.push(act(self.icons.muted(), "Leave the voice channel".into(), "", Cmd::LeaveVoice));
+            actions.push(act(self.icons.get(Icon::Muted), "Leave the voice channel".into(), "", Cmd::LeaveVoice));
         }
         for ch in self.channels.iter().filter(|c| !c.is_text()) {
             if self.voice.as_ref().is_some_and(|v| v.channel == ch.name) {
@@ -1222,23 +1223,23 @@ impl App {
             }
             let inside = self.voice_members(&ch.name).len();
             let hint = if inside > 0 { format!("{inside} inside") } else { String::new() };
-            actions.push(act(self.icons.voice(), format!("Join voice {}", ch.name), &hint, Cmd::Voice(ch.name.clone())));
+            actions.push(act(self.icons.get(Icon::Voice), format!("Join voice {}", ch.name), &hint, Cmd::Voice(ch.name.clone())));
         }
         let mic = if self.muted() { "Turn the microphone on" } else { "Turn the microphone off" };
-        actions.push(act("🎤", mic.into(), "Alt+M", Cmd::Mute));
+        actions.push(act(self.icons.get(Icon::Mic), mic.into(), "Alt+M", Cmd::Mute));
         let sound = if self.deafened() { "Turn sound on" } else { "Turn sound off (hear no one)" };
-        actions.push(act("🎧", sound.into(), "Alt+D", Cmd::Deafen));
-        actions.push(act("📎", "Send a file…".into(), "Ctrl+O", Cmd::Upload));
-        actions.push(act(self.icons.voice(), "Peer volumes…".into(), "F3", Cmd::Users));
-        actions.push(act("⚙", "Settings…".into(), "F2", Cmd::Settings));
-        actions.push(act("✎", "Your message style: color, gradient, markup…".into(), "F4", Cmd::Style));
+        actions.push(act(self.icons.get(Icon::Sound), sound.into(), "Alt+D", Cmd::Deafen));
+        actions.push(act(self.icons.get(Icon::Attachment), "Send a file…".into(), "Ctrl+O", Cmd::Upload));
+        actions.push(act(self.icons.get(Icon::Voice), "Peer volumes…".into(), "F3", Cmd::Users));
+        actions.push(act(self.icons.get(Icon::Settings), "Settings…".into(), "F2", Cmd::Settings));
+        actions.push(act(self.icons.get(Icon::Edit), "Your message style: color, gradient, markup…".into(), "F4", Cmd::Style));
         actions.push(act("#", "Create a text channel…".into(), "/new", Cmd::NewChannel(ChannelKind::Text)));
-        actions.push(act(self.icons.voice(), "Create a voice channel…".into(), "/newvoice", Cmd::NewChannel(ChannelKind::Voice)));
+        actions.push(act(self.icons.get(Icon::Voice), "Create a voice channel…".into(), "/newvoice", Cmd::NewChannel(ChannelKind::Voice)));
         let members = if self.settings.members { "Hide the online panel" } else { "Show the online panel" };
         actions.push(act("☰", members.into(), "", Cmd::ToggleMembers));
         for name in Theme::names() {
             if name != self.settings.theme {
-                actions.push(act("🎨", format!("Theme: {name}"), "", Cmd::Theme(name.to_string())));
+                actions.push(act(self.icons.get(Icon::Theme), format!("Theme: {name}"), "", Cmd::Theme(name.to_string())));
             }
         }
         // deleting is rarer than anything above: at the end, found by typing "delete"

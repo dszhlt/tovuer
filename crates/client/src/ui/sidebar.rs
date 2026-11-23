@@ -5,6 +5,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
+use super::icons::Icon;
 use super::{Hit, fill, meter, put, put_right, text};
 use crate::app::model::clock;
 use crate::app::{App, Focus};
@@ -105,7 +106,7 @@ pub fn channels(buf: &mut Buffer, area: Rect, app: &mut App) {
                 if open || joined {
                     put(buf, x, y, "▎", Style::new().fg(if joined { t.ok } else { t.accent }).bg(bg), 1);
                 }
-                let icon = if ch.is_text() { "# " } else { app.icons.voice_channel() };
+                let icon = if ch.is_text() { "# ".to_string() } else { app.icons.spaced(Icon::Voice) };
                 let mut right = x + w;
                 if ch.mentions > 0 {
                     let pill = format!(" @{} ", ch.mentions);
@@ -120,8 +121,8 @@ pub fn channels(buf: &mut Buffer, area: Rect, app: &mut App) {
                     }
                 }
                 let room = right.saturating_sub(x + 2 + 1) as usize;
-                let nx = put(buf, x + 2, y, icon, style, 3);
-                put(buf, nx, y, &text::clip(&ch.name, room.saturating_sub(text::width(icon))), style, room as u16);
+                let nx = put(buf, x + 2, y, &icon, style, 3);
+                put(buf, nx, y, &text::clip(&ch.name, room.saturating_sub(text::width(&icon))), style, room as u16);
             }
             Row::Member(id) => {
                 let Some(user) = app.user(*id) else { continue };
@@ -136,9 +137,9 @@ pub fn channels(buf: &mut Buffer, area: Rect, app: &mut App) {
                 put(buf, x + 5, y, dot, Style::new().fg(if speaking { t.ok } else { color }).bg(t.panel), 1);
                 // on the right: microphone/sound state or the live voice level
                 let tail = if user.deafened {
-                    Some(("🔕".to_string(), t.err))
+                    Some((app.icons.get(Icon::Deafened).to_string(), t.err))
                 } else if user.muted {
-                    Some((app.icons.muted().to_string(), t.err))
+                    Some((app.icons.get(Icon::Muted).to_string(), t.err))
                 } else if speaking {
                     let level = if *id == my_id { app.engine.controls().mic_level() } else { app.engine.peer_level(*id) };
                     let bars = if level > 0.002 { level_bars(level) } else { wave_bars(app.frame, *id) };
@@ -168,7 +169,7 @@ pub fn channels(buf: &mut Buffer, area: Rect, app: &mut App) {
     put(buf, x + 1, me_y, "●", Style::new().fg(t.nick(&me)).bg(t.raised), 1);
     let mut right = x + w;
     if app.is_admin() {
-        right = put_right(buf, right - 1, me_y, "👑", Style::new().bg(t.raised), x + 4);
+        right = put_right(buf, right - 1, me_y, app.icons.get(Icon::Admin), Style::new().fg(t.warn).bg(t.raised), x + 4);
     }
     let room = right.saturating_sub(x + 3 + 1) as usize;
     put(buf, x + 3, me_y, &text::clip(&me, room), Style::new().fg(t.text).bg(t.raised).add_modifier(Modifier::BOLD), room as u16);
@@ -186,7 +187,7 @@ fn voice_dock(buf: &mut Buffer, area: Rect, app: &App) {
     let time = clock(session.since.elapsed());
     let right = put_right(buf, x + w - 1, area.y, &time, Style::new().fg(t.faint).bg(bg), x + 6);
     let room = right.saturating_sub(x + 4 + 1) as usize;
-    put(buf, x + 1, area.y, app.icons.voice(), Style::new().fg(t.ok).bg(bg), 2);
+    put(buf, x + 1, area.y, app.icons.get(Icon::Voice), Style::new().fg(t.ok).bg(bg), 2);
     put(buf, x + 4, area.y, &text::clip(&session.channel, room), Style::new().fg(t.ok).bg(bg).add_modifier(Modifier::BOLD), room as u16);
 
     // line 2: the microphone level and state
@@ -203,7 +204,7 @@ fn voice_dock(buf: &mut Buffer, area: Rect, app: &App) {
         ("ON AIR", t.ok)
     };
     let label_x = put_right(buf, x + w - 1, area.y + 1, label, Style::new().fg(color).bg(bg).add_modifier(Modifier::BOLD), x + 6);
-    put(buf, x + 1, area.y + 1, "🎤", Style::new().bg(bg), 2);
+    put(buf, x + 1, area.y + 1, app.icons.get(Icon::Mic), Style::new().fg(color).bg(bg), 2);
     let bar_w = label_x.saturating_sub(x + 4 + 1);
     // the meter works while muted too: you can see the microphone hears at all
     let level = (app.engine.controls().mic_level() * 4.0).min(1.0);
@@ -243,13 +244,13 @@ pub fn members(buf: &mut Buffer, area: Rect, app: &App) {
         let speaking = app.speaking.contains(&user.id) && !user.muted;
         put(buf, x + 1, y, if speaking { "◉" } else { "●" }, Style::new().fg(if speaking { t.ok } else { t.nick(&user.name) }).bg(t.panel), 1);
         let icon = if user.deafened {
-            Some(("🔕", t.err))
+            Some((app.icons.get(Icon::Deafened), t.err))
         } else if user.muted && user.voice.is_some() {
-            Some((app.icons.muted(), t.err))
+            Some((app.icons.get(Icon::Muted), t.err))
         } else if user.voice.is_some() {
-            Some((app.icons.voice(), t.dim))
+            Some((app.icons.get(Icon::Voice), t.dim))
         } else if user.admin {
-            Some(("👑", t.dim))
+            Some((app.icons.get(Icon::Admin), t.warn))
         } else {
             None
         };

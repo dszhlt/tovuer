@@ -2,7 +2,7 @@
 # Regenerate the README screenshots in docs/screenshots: the client draws demo
 # scenes into HTML (the snapshot example) and headless Chromium takes the
 # pictures. Needs chromium, ImageMagick (magick) and JetBrainsMono Nerd Font
-# (the voice icons are its glyphs).
+# (the icons are its glyphs).
 set -e
 cd "$(dirname "$0")/.."
 OUT=docs/screenshots
