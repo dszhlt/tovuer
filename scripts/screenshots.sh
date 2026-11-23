@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Regenerate the README screenshots in docs/screenshots: the client draws demo
 # scenes into HTML (the snapshot example) and headless Chromium takes the
-# pictures. Needs chromium and ImageMagick (magick).
+# pictures. Needs chromium, ImageMagick (magick) and JetBrainsMono Nerd Font
+# (the voice icons are its glyphs).
 set -e
 cd "$(dirname "$0")/.."
 OUT=docs/screenshots
@@ -12,7 +13,7 @@ mkdir -p "$OUT"
 
 shot() {  # <file> <scene> <theme> <columns> <rows>
   local file=$1 scene=$2 theme=$3 cols=$4 rows=$5
-  target/debug/examples/snapshot "$scene" "$theme" "$cols" "$rows" "$TMP/raw.html" 2>/dev/null
+  TOVUER_ICONS=nerd target/debug/examples/snapshot "$scene" "$theme" "$cols" "$rows" "$TMP/raw.html" 2>/dev/null
   # a window: rounded corners, a thin edge and a soft shadow on a transparent page
   sed 's/body{margin:0;background:#000}/body{margin:0;padding:18px 22px 28px;background:transparent}.t{border-radius:12px;overflow:hidden;box-shadow:0 0 0 1px rgba(255,255,255,.08),0 10px 28px rgba(0,0,0,.45)}/' \
     "$TMP/raw.html" > "$TMP/page.html"
