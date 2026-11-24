@@ -97,6 +97,18 @@ pub enum ThumbState {
     Failed,
 }
 
+/// A feed thumbnail in the terminal's own graphics.
+pub enum SharpThumb {
+    /// Being encoded for this many cells.
+    Loading((u16, u16)),
+    Ready(Arc<crate::transfer::Sharp>),
+    /// Blocks stay.
+    Failed,
+}
+
+/// Feed thumbnails encoded at the same time at most: each decodes a picture.
+const SHARP_THUMBS_AT_ONCE: usize = 2;
+
 /// We are in a voice channel.
 #[derive(Debug, Clone)]
 pub struct VoiceSession {
@@ -218,6 +230,7 @@ pub struct App {
     pub log: Vec<LogLine>,
     pub transfers: Vec<Transfer>,
     pub thumbs: HashMap<String, ThumbState>,
+    pub sharp_thumbs: HashMap<String, SharpThumb>,
     pub updating: Option<(u64, u64)>,
 
     pub engine: Arc<Engine>,
@@ -228,6 +241,8 @@ pub struct App {
     pub graphics: Option<ratatui_image::picker::Picker>,
     /// Nerd Font glyphs or emoji for the voice icons.
     pub icons: crate::ui::icons::Icons,
+    /// ffmpeg is installed: videos get a frame as a preview.
+    pub video: bool,
 
     pub ui: UiState,
     pub effects: Vec<Effect>,
@@ -305,6 +320,7 @@ impl App {
             log: Vec::new(),
             transfers: Vec::new(),
             thumbs: HashMap::new(),
+            sharp_thumbs: HashMap::new(),
             updating: None,
             engine,
             net,
@@ -312,6 +328,7 @@ impl App {
             remote: None,
             graphics: None,
             icons: Default::default(),
+            video: false,
             ui: UiState::default(),
             effects: Vec::new(),
             focused: true,
@@ -965,8 +982,13 @@ impl App {
         self.dirty = true;
     }
 
-    /// Open an attachment: a picture full screen, anything else is downloaded.
+    /// Open an attachment: a picture full screen, a video in the system's
+    /// player, anything else is downloaded.
     pub fn open_file(&mut self, file: FileMeta) {
+        if crate::transfer::is_video(&file) {
+            self.open_outside(file);
+            return;
+        }
         if !file.image {
             self.save_file(file, None);
             return;
@@ -1014,6 +1036,19 @@ impl App {
                 _ => [24, 24, 28],
             };
             remote.sharp(file, graphics, area, backdrop);
+        }
+        if let Some(graphics) = self.graphics.clone() {
+            for (file, cells) in std::mem::take(&mut self.ui.want_sharp_thumbs) {
+                let busy = self.sharp_thumbs.values().filter(|s| matches!(s, SharpThumb::Loading(_))).count();
+                if busy >= SHARP_THUMBS_AT_ONCE {
+                    break; // the rest is asked for again on the next frame
+                }
+                if matches!(self.sharp_thumbs.get(&file.id), Some(SharpThumb::Loading(c)) if *c == cells) {
+                    continue;
+                }
+                self.sharp_thumbs.insert(file.id.clone(), SharpThumb::Loading(cells));
+                remote.sharp_thumb(file, graphics.clone(), cells);
+            }
         }
         for file in wanted {
             if self.thumbs.contains_key(&file.id) {
@@ -1171,10 +1206,13 @@ impl App {
     /// Ask for a preview if the file picker's cursor is on a picture.
     pub fn peek_current(&mut self) {
         let tasks = self.tasks.clone();
+        let graphics = self.graphics.clone().filter(|_| self.settings.sharp);
+        let video = self.video;
         let Some(Overlay::Picker(picker)) = self.overlay.as_mut() else { return };
+        // a video is not read whole for a frame: any size will do
         let target = picker
             .current()
-            .filter(|e| !e.dir && tovuer_proto::is_image_name(&e.name) && e.size <= 32 << 20)
+            .filter(|e| !e.dir && ((tovuer_proto::is_image_name(&e.name) && e.size <= 32 << 20) || (video && tovuer_proto::is_video_name(&e.name))))
             .and_then(|_| picker.current_path());
         match target {
             Some(path) => {
@@ -1183,7 +1221,7 @@ impl App {
                 }
                 picker.peek = Some((path.clone(), overlay::Peek::Loading));
                 if tokio::runtime::Handle::try_current().is_ok() {
-                    crate::transfer::peek(tasks, path, 40, 16);
+                    crate::transfer::peek(tasks, path, 40, 16, graphics);
                 }
             }
             None => picker.peek = None,

@@ -456,9 +456,21 @@ pub fn is_image_name(name: &str) -> bool {
     [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"].iter().any(|ext| lower.ends_with(ext))
 }
 
+/// A video by its name: the client previews a frame of it.
+pub fn is_video_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    [".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".ogv", ".3gp"].iter().any(|ext| lower.ends_with(ext))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn videos_are_told_by_name() {
+        assert!(is_video_name("Holiday.MP4") && is_video_name("clip.webm") && is_video_name("a.mkv"));
+        assert!(!is_video_name("notes.ts") && !is_video_name("photo.jpg") && !is_video_name("mp4"));
+    }
 
     #[test]
     fn client_msg_wire_format_is_tagged() {

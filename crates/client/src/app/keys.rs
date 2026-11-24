@@ -17,13 +17,6 @@ fn is_alt(key: &KeyEvent) -> bool {
 }
 
 /// A single letter without modifiers (either case).
-fn plain(key: &KeyEvent) -> Option<char> {
-    match key.code {
-        KeyCode::Char(c) if !is_ctrl(key) && !is_alt(key) => Some(c),
-        _ => None,
-    }
-}
-
 impl App {
     pub fn on_key(&mut self, key: KeyEvent) {
         if key.kind == KeyEventKind::Release {
@@ -195,16 +188,6 @@ impl App {
                 return;
             }
             _ => {
-                if self.input.is_empty() && self.settings.quick_keys {
-                    match plain(&key) {
-                        Some('m' | 'M') => return self.toggle_mute(),
-                        Some('u' | 'U') => {
-                            self.overlay = Some(Overlay::Users { sel: 0 });
-                            return;
-                        }
-                        _ => {}
-                    }
-                }
                 if !self.input.key(key) {
                     return;
                 }
@@ -832,7 +815,6 @@ impl App {
             Setting::Bell => on(s.bell),
             Setting::Notify => on(s.notify),
             Setting::NotifyAll => on(s.notify_all),
-            Setting::QuickKeys => on(s.quick_keys),
         }
     }
 
@@ -899,7 +881,6 @@ impl App {
             Setting::Bell => self.settings.bell = !self.settings.bell,
             Setting::Notify => self.settings.notify = !self.settings.notify,
             Setting::NotifyAll => self.settings.notify_all = !self.settings.notify_all,
-            Setting::QuickKeys => self.settings.quick_keys = !self.settings.quick_keys,
         }
         self.apply_audio_settings();
         self.save_settings();

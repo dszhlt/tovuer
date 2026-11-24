@@ -32,6 +32,22 @@ pub enum Hit {
     Input,
 }
 
+/// A picture drawn with blocks, wholly in view: real pixels go there at the
+/// end of the frame if nothing has been drawn over it by then.
+pub struct Spot {
+    pub image: SpotImage,
+    pub rect: Rect,
+    /// The cells as the blocks left them.
+    pub cells: u64,
+}
+
+pub enum SpotImage {
+    /// A feed thumbnail: encoded when first wanted, kept in `App::sharp_thumbs`.
+    Feed(FileMeta),
+    /// Already encoded (the file picker's preview).
+    Ready(std::sync::Arc<crate::transfer::Sharp>),
+}
+
 /// What drawing remembers between frames and reports to the logic.
 #[derive(Default)]
 pub struct UiState {
@@ -48,6 +64,12 @@ pub struct UiState {
     pub want_thumbs: Vec<FileMeta>,
     /// A picture the viewer wants in the terminal's own graphics, for this many cells.
     pub want_sharp: Option<(FileMeta, (u16, u16))>,
+    /// Feed thumbnails wanted in the terminal's own graphics, for so many cells.
+    pub want_sharp_thumbs: Vec<(FileMeta, (u16, u16))>,
+    /// This frame's places for sharp feed thumbnails.
+    pub spots: Vec<Spot>,
+    /// Where this frame put Sixel/iTerm2 thumbnails.
+    pub placed: Vec<Rect>,
     /// A Sixel/iTerm2 picture is on screen: what was drawn over it last frame.
     /// Such a picture is not redrawn by itself, so when that changes the
     /// whole screen is repainted.
@@ -230,6 +252,8 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &mut App) -> Option<(u16, u16)>
     app.ui.hits.clear();
     app.ui.fragile_now = false;
     app.ui.animating = false;
+    app.ui.spots.clear();
+    app.ui.placed.clear();
     if area.width < 40 || area.height < 12 {
         let style = Style::new().fg(t.dim);
         put_center(buf, area, area.y + area.height / 2, "the window is too small", style);
@@ -248,13 +272,62 @@ pub fn render(buf: &mut Buffer, area: Rect, app: &mut App) -> Option<(u16, u16)>
         cursor = overlays::draw(buf, area, app);
     }
     toasts(buf, area, app);
+    sharp_thumbs(buf, app);
     watch_fragile(app);
     cursor
 }
 
+/// A fingerprint of the cells in `rect`.
+pub fn cells_hash(buf: &Buffer, rect: Rect) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for y in rect.top()..rect.bottom() {
+        for x in rect.left()..rect.right() {
+            if let Some(cell) = buf.cell((x, y)) {
+                (cell.symbol(), cell.fg, cell.bg, cell.modifier).hash(&mut hasher);
+            }
+        }
+    }
+    hasher.finish()
+}
+
+/// Real pixels over the feed's block thumbnails, where nothing else (a
+/// window, a toast, a popup) was drawn on top of them in this frame.
+fn sharp_thumbs(buf: &mut Buffer, app: &mut App) {
+    use ratatui::widgets::Widget;
+    use crate::app::SharpThumb;
+    for spot in std::mem::take(&mut app.ui.spots) {
+        if cells_hash(buf, spot.rect) != spot.cells {
+            continue;
+        }
+        let cells = (spot.rect.width, spot.rect.height);
+        let sharp = match spot.image {
+            SpotImage::Ready(sharp) => sharp,
+            SpotImage::Feed(file) => match app.sharp_thumbs.get(&file.id) {
+                Some(SharpThumb::Ready(sharp)) if sharp.size() == cells => sharp.clone(),
+                Some(SharpThumb::Loading(asked)) if *asked == cells => continue,
+                Some(SharpThumb::Failed) => continue,
+                _ => {
+                    app.ui.want_sharp_thumbs.push((file, cells));
+                    continue;
+                }
+            },
+        };
+        if sharp.size() != cells {
+            continue;
+        }
+        ratatui_image::Image::new(&sharp.proto).render(spot.rect, buf);
+        if sharp.fragile() {
+            app.ui.fragile_now = true;
+            app.ui.placed.push(spot.rect);
+        }
+    }
+}
+
 /// A Sixel or iTerm2 picture lives only in the terminal: the cells under it
-/// are not redrawn, so a toast that disappears from over it would stay as a
-/// ghost. When what lies on top of such a picture changes, repaint everything.
+/// are not redrawn, so a toast that disappears from over it, or the picture
+/// itself after it moved or went away, would stay as a ghost. When what lies
+/// on top of such pictures or where they are changes, repaint everything.
 fn watch_fragile(app: &mut App) {
     use std::hash::{Hash, Hasher};
     let covers = app.ui.fragile_now.then(|| {
@@ -262,11 +335,10 @@ fn watch_fragile(app: &mut App) {
         for toast in &app.toasts {
             toast.text.hash(&mut hasher);
         }
+        app.ui.placed.hash(&mut hasher);
         hasher.finish()
     });
-    if let (Some(now), Some(before)) = (covers, app.ui.fragile)
-        && now != before
-    {
+    if app.ui.fragile.is_some() && covers != app.ui.fragile {
         app.ui.repaint = true;
     }
     app.ui.fragile = covers;

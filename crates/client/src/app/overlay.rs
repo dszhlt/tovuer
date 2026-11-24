@@ -155,11 +155,10 @@ pub enum Setting {
     Bell,
     Notify,
     NotifyAll,
-    QuickKeys,
 }
 
 impl Setting {
-    pub const ALL: [Setting; 21] = [
+    pub const ALL: [Setting; 20] = [
         Setting::Theme,
         Setting::Transparent,
         Setting::Members,
@@ -180,7 +179,6 @@ impl Setting {
         Setting::Bell,
         Setting::Notify,
         Setting::NotifyAll,
-        Setting::QuickKeys,
     ];
 
     /// The section heading, if a section starts at this row.
@@ -189,7 +187,6 @@ impl Setting {
             Setting::Theme => Some("LOOK"),
             Setting::Mic => Some("AUDIO"),
             Setting::Sounds => Some("NOTIFICATIONS"),
-            Setting::QuickKeys => Some("CONTROLS"),
             _ => None,
         }
     }
@@ -216,7 +213,6 @@ impl Setting {
             Setting::Bell => "Bell on mention",
             Setting::Notify => "Desktop notifications",
             Setting::NotifyAll => "Notify about every message",
-            Setting::QuickKeys => "M and U on an empty line",
         }
     }
 
@@ -226,7 +222,7 @@ impl Setting {
             Setting::Transparent => "do not paint the background: the terminal's own shows through",
             Setting::Members => "the member list on the right (always hidden in narrow windows)",
             Setting::Previews => "show thumbnails of shared pictures",
-            Setting::Sharp => "the viewer draws real pixels (sixel/kitty) if the terminal can; o there opens the original",
+            Setting::Sharp => "pictures in the feed and the viewer in real pixels (sixel/kitty) if the terminal can; o opens the original",
             Setting::MyStyle => "Enter — color, a flowing gradient, bold / italic / strike / code for all you write (F4)",
             Setting::Styles => "how colors and gradients others picked show for you: flowing, still, or plain text",
             Setting::Mouse => "wheel and clicks; selecting text then needs Shift",
@@ -234,14 +230,13 @@ impl Setting {
             Setting::Denoise => "removes room noise, fans and keyboard clatter",
             Setting::Agc => "a quiet voice is raised, a loud one is tamed",
             Setting::MicGain => "manual boost on top of the automatic level",
-            Setting::Volume => "overall volume; per person — separately, key U",
+            Setting::Volume => "overall volume; per person — separately, F3",
             Setting::Sensitivity => "strict — only clear speech; sensitive — catches whispers too",
             Setting::Monitor => "hear yourself the way others do (headphones recommended)",
             Setting::Sounds => "a chime when someone joins or leaves the voice channel",
             Setting::Bell => "the terminal bell when someone @mentions you",
             Setting::Notify => "a desktop notification while the window is not focused",
             Setting::NotifyAll => "otherwise — mentions only",
-            Setting::QuickKeys => "a lone M (microphone) or U (volumes) works while the line is empty",
         }
     }
 }
@@ -279,7 +274,8 @@ pub struct Entry {
 
 pub enum Peek {
     Loading,
-    Ready(Thumb),
+    /// Blocks, and real pixels if the terminal has graphics.
+    Ready(Thumb, Option<Arc<Sharp>>),
     Failed,
 }
 
@@ -503,7 +499,7 @@ mod tests {
 
     #[test]
     fn settings_sections_cover_all_rows() {
-        assert_eq!(Setting::ALL.iter().filter(|s| s.section().is_some()).count(), 4);
+        assert_eq!(Setting::ALL.iter().filter(|s| s.section().is_some()).count(), 3);
         assert!(Setting::ALL[0].section().is_some(), "the first row opens a section");
         for s in Setting::ALL {
             assert!(!s.label().is_empty() && !s.help().is_empty());

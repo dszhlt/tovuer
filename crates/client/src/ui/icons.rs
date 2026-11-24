@@ -25,6 +25,7 @@ pub enum Icon {
     /// A file attached to a message.
     Attachment,
     Picture,
+    Video,
     Folder,
     File,
     Search,
@@ -35,7 +36,7 @@ pub enum Icon {
 }
 
 impl Icon {
-    pub const ALL: [Icon; 15] = [
+    pub const ALL: [Icon; 16] = [
         Icon::Voice,
         Icon::Muted,
         Icon::Deafened,
@@ -44,6 +45,7 @@ impl Icon {
         Icon::Admin,
         Icon::Attachment,
         Icon::Picture,
+        Icon::Video,
         Icon::Folder,
         Icon::File,
         Icon::Search,
@@ -66,6 +68,7 @@ impl Icon {
             Icon::Admin => ("👑", "\u{f11d0} "),      // md-crown_outline
             Icon::Attachment => ("📎", "\u{f4fb} "),  // oct-paperclip
             Icon::Picture => ("📷", "\u{f4e5} "),     // oct-image
+            Icon::Video => ("🎬", "\u{f52c} "),       // oct-video
             Icon::Folder => ("📁", "\u{f413} "),      // oct-file_directory
             Icon::File => ("📄", "\u{f4a5} "),        // oct-file
             Icon::Search => ("🔍", "\u{f422} "),      // oct-search

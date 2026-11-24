@@ -218,7 +218,7 @@ fn voice_dock(buf: &mut Buffer, area: Rect, app: &App) {
         .and_then(|i| i.mic.clone())
         .unwrap_or_else(|| if session.starting { "opening devices…".into() } else { "no microphone".into() });
     put(buf, x + 1, area.y + 2, &text::clip(&device, w as usize - 2), Style::new().fg(t.faint).bg(bg), w - 2);
-    let hint = if w >= 30 { "M mic · Alt+D sound · /v leave" } else { "M mic · Alt+D sound" };
+    let hint = if w >= 34 { "Alt+M mic · Alt+D sound · /v leave" } else { "Alt+M mic · Alt+D sound" };
     put(buf, x + 1, area.y + 3, &text::clip(hint, w as usize - 2), Style::new().fg(t.faint).bg(bg), w - 2);
 }
 

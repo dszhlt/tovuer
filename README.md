@@ -42,11 +42,17 @@ and Windows.
   message, so everyone sees it; colors are kept readable on each reader's
   theme, and anyone can show others' styles still or turn them off.
 - Files up to 50 MB, sent byte for byte. Pictures right in the feed and full
-  screen. The full-screen viewer draws real pixels where the terminal has
-  graphics (Sixel — foot, xterm; Kitty — kitty, Ghostty; iTerm2 — WezTerm),
-  colored blocks elsewhere (and on Windows, unless `TOVUER_GRAPHICS=sixel`).
+  screen. Both draw real pixels where the terminal has graphics (Sixel —
+  foot, xterm; Kitty — kitty, Ghostty; iTerm2 — WezTerm), colored blocks
+  elsewhere (and on Windows, unless `TOVUER_GRAPHICS=sixel`). A feed picture
+  cut by the edge of the window shows as blocks until it is wholly in view.
   `o` opens the original in your image viewer, full quality, whatever the
   terminal is.
+- Videos show a frame with a play mark and their length, in the feed and
+  in the file picker, the same way; `Enter` plays one in your system's
+  player. The frame comes from `ffmpeg` if it is installed (it may only
+  open plain video files: no playlists or links); without it a video is
+  an ordinary file.
 - Channels on the fly, each with its own topic and draft.
 
 **Interface**
@@ -153,16 +159,16 @@ The details are in [protocol.md](protocol.md).
 | `PgUp` / `PgDn` | scroll the feed, `Ctrl+End` — to the latest |
 | `Enter` | send; `Alt+Enter` — new line |
 | `↑` on an empty line | edit your last message |
-| `Alt+M` | microphone (or just `M` on an empty line) |
+| `Alt+M` | microphone (also `m` in the channel list) |
 | `Alt+D` | sound: hear no one and stay silent |
 | `Ctrl+O` | send a file (or drop a file into the terminal window) |
-| `F1` · `F2` · `F3` | help · settings · peer volumes (`F3` — also `U` on an empty line) |
+| `F1` · `F2` · `F3` | help · settings · peer volumes |
 | `F4` | your message style: color, flowing gradient, bold / italic / strike / code |
 | `Ctrl+L` | system log |
 | `Ctrl+Q` | quit |
 
 In message mode (`Shift+Tab` from the input): `r` reply, `e` edit, `d` delete,
-`a` react, `Enter` open a file or picture, `o` open it in your system's app
+`a` react, `Enter` open a picture, a video or a file, `o` open it in your system's app
 (a photo in full quality), `s` save, `y` copy the text. In the picture viewer:
 `←`/`→` flip, `o` open the original, `s` save.
 
@@ -185,7 +191,7 @@ channel…", "Delete channel #…".
 | `/volume <0-200>`, `/gain <50-300>` | overall volume; microphone gain |
 | `/denoise`, `/agc` | noise suppression and automatic level (`on`/`off`) |
 | `/devices`, `/mic [name]`, `/spk [name]` | devices; `/mic` without a name — audio diagnostics |
-| `/theme [name\|next]`, `/transparent`, `/previews`, `/sharp`, `/mouse` | looks (`/sharp` — real pixels in the viewer) |
+| `/theme [name\|next]`, `/transparent`, `/previews`, `/sharp`, `/mouse` | looks (`/sharp` — real pixels for pictures) |
 | `/style`, `/color [name\|#rrggbb\|off]`, `/gradient [name\|#hex #hex…\|off]` | how your messages look (`/gradient sunset`, `/color #ff8800`) |
 | `/new [name]`, `/newvoice [name]`, `/topic <text>` | create a text / voice channel (without a name — asks), the topic |
 | `/delchannel [name]`, `/kick <nick>` | room owner only: delete a text or voice channel (without a name — the open one), remove someone |

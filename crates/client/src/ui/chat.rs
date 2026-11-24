@@ -13,11 +13,11 @@ use super::icons::{Icon, Icons};
 use super::look::{Paint, look, paint_row};
 use super::text::{Markup, clip, message_lines, width};
 use super::theme::Theme;
-use super::{Hit, fill, frame, hrule, put, put_center, put_line, put_right, spinner};
-use crate::app::model::{ChannelState, day_label, local_time, plural, same_day};
+use super::{Hit, Spot, SpotImage, cells_hash, fill, frame, hrule, put, put_center, put_line, put_right, spinner};
+use crate::app::model::{ChannelState, clock, day_label, local_time, plural, same_day};
 use crate::app::{App, Compose, Focus, ThumbState};
 use crate::settings::human_size;
-use crate::transfer::{AUTO_PREVIEW_LIMIT, Thumb};
+use crate::transfer::{AUTO_PREVIEW_LIMIT, Thumb, VIDEO_PREVIEW_LIMIT, is_video};
 
 /// The laid-out lines of one message and a fingerprint of what they came from.
 pub struct Laid {
@@ -28,6 +28,8 @@ pub struct Laid {
     body: std::ops::Range<usize>,
     /// The widest text line — a still gradient stretches over it.
     widest: usize,
+    /// The lines of the picture's thumbnail and its width in cells.
+    thumb: Option<(std::ops::Range<usize>, u16)>,
 }
 
 /// The input grows no taller than this — beyond it the text scrolls inside.
@@ -216,7 +218,10 @@ fn thumb_lines(thumb: &Thumb) -> Vec<Line<'static>> {
 
 /// Whether this message shows a thumbnail.
 fn wants_preview(app: &App, msg: &Message) -> bool {
-    app.settings.previews && msg.file.as_ref().is_some_and(|f| f.image && f.size <= AUTO_PREVIEW_LIMIT)
+    app.settings.previews
+        && msg.file.as_ref().is_some_and(|f| {
+            (f.image && f.size <= AUTO_PREVIEW_LIMIT) || (app.video && is_video(f) && f.size <= VIDEO_PREVIEW_LIMIT)
+        })
 }
 
 fn signature(app: &App, msg: &Message, header: bool, w: usize) -> u64 {
@@ -242,7 +247,7 @@ fn signature(app: &App, msg: &Message, header: bool, w: usize) -> u64 {
 fn lay(app: &App, msg: &Message, header: bool, w: usize) -> Laid {
     let t = &app.theme;
     let mut lines: Vec<Line<'static>> = Vec::new();
-    let (mut paint, mut body, mut widest) = (None, 0..0, 0);
+    let (mut paint, mut body, mut widest, mut thumb_at) = (None, 0..0, 0, None);
     if msg.system {
         let markup = Markup { theme: t, me: "", base: Style::new().fg(t.faint).add_modifier(Modifier::ITALIC) };
         for (i, line) in message_lines(&msg.text, &markup, w.saturating_sub(2).max(1)).into_iter().enumerate() {
@@ -250,7 +255,7 @@ fn lay(app: &App, msg: &Message, header: bool, w: usize) -> Laid {
             spans.extend(line.spans);
             lines.push(Line::from(spans));
         }
-        return Laid { sig: 0, lines, paint, body, widest };
+        return Laid { sig: 0, lines, paint, body, widest, thumb: None };
     }
     if header {
         let time = local_time(msg.ts).format("%H:%M").to_string();
@@ -286,16 +291,33 @@ fn lay(app: &App, msg: &Message, header: bool, w: usize) -> Laid {
         lines.extend(text);
     }
     if let Some(file) = &msg.file {
-        let size = human_size(file.size);
+        let video = is_video(file);
+        let mut size = human_size(file.size);
+        // a video's length is known once its frame is ready
+        if let Some(ThumbState::Ready(thumb)) = app.thumbs.get(&file.id)
+            && let Some(seconds) = thumb.duration.filter(|_| video)
+        {
+            size = format!("{size} · {}", clock(std::time::Duration::from_secs(seconds as u64)));
+        }
         let room = w.saturating_sub(width(&size) + 6).max(4);
+        let icon = if file.image {
+            Icon::Picture
+        } else if video {
+            Icon::Video
+        } else {
+            Icon::Attachment
+        };
         lines.push(Line::from(vec![
-            Span::styled(app.icons.spaced(if file.image { Icon::Picture } else { Icon::Attachment }), Style::new().fg(t.dim)),
+            Span::styled(app.icons.spaced(icon), Style::new().fg(t.dim)),
             Span::styled(clip(&file.name, room), Style::new().fg(t.info).add_modifier(Modifier::UNDERLINED)),
             Span::styled(format!("  {size}"), Style::new().fg(t.faint)),
         ]));
         if wants_preview(app, msg) {
             match app.thumbs.get(&file.id) {
-                Some(ThumbState::Ready(thumb)) if thumb.w as usize <= w => lines.extend(thumb_lines(thumb)),
+                Some(ThumbState::Ready(thumb)) if thumb.w as usize <= w => {
+                    thumb_at = Some((lines.len()..lines.len() + thumb.rows() as usize, thumb.w));
+                    lines.extend(thumb_lines(thumb));
+                }
                 Some(ThumbState::Ready(_)) | Some(ThumbState::Failed) => {}
                 Some(ThumbState::Loading) | None => {
                     lines.push(Line::from(Span::styled(format!("{}loading the preview…", app.icons.spaced(Icon::Loading)), Style::new().fg(t.faint))));
@@ -327,7 +349,7 @@ fn lay(app: &App, msg: &Message, header: bool, w: usize) -> Laid {
     if lines.is_empty() {
         lines.push(Line::default());
     }
-    Laid { sig: 0, lines, paint, body, widest }
+    Laid { sig: 0, lines, paint, body, widest, thumb: thumb_at }
 }
 
 fn pre_rows(ch: &ChannelState, i: usize, now: chrono::DateTime<chrono::Local>) -> Vec<Pre> {
@@ -447,6 +469,8 @@ fn messages(buf: &mut Buffer, area: Rect, app: &mut App) {
     let first = starts.partition_point(|s| *s <= top).saturating_sub(1);
     let mut wanted = Vec::new();
     let mut animating = false;
+    let sharp = app.sharp_pictures();
+    let mut spots = Vec::new();
     for (i, start) in starts.iter().enumerate().skip(first) {
         if *start >= top + rows {
             break;
@@ -498,8 +522,19 @@ fn messages(buf: &mut Buffer, area: Rect, app: &mut App) {
             }
             row += 1;
         }
+        // a thumbnail wholly in view may get real pixels at the end of the frame
+        if sharp
+            && let (Some((lines, cols)), Some(file)) = (&laid.thumb, &msg.file)
+        {
+            let first = start + pre.len() + lines.start;
+            if first >= top && first + lines.len() <= top + rows {
+                let rect = Rect::new(area.x + 2, area.y + pad + (first - top) as u16, *cols, lines.len() as u16);
+                spots.push(Spot { image: SpotImage::Feed(file.clone()), rect, cells: cells_hash(buf, rect) });
+            }
+        }
     }
     app.ui.want_thumbs.extend(wanted);
+    app.ui.spots.extend(spots);
     app.ui.animating |= animating;
 
     // a scrollbar only when there is something to scroll
@@ -527,7 +562,7 @@ mod tests {
 
     #[test]
     fn thumbnails_use_half_blocks() {
-        let thumb = Thumb { w: 2, h: 4, px: vec![[1, 1, 1], [2, 2, 2], [3, 3, 3], [4, 4, 4], [5, 5, 5], [6, 6, 6], [7, 7, 7], [8, 8, 8]] };
+        let thumb = Thumb { w: 2, h: 4, px: vec![[1, 1, 1], [2, 2, 2], [3, 3, 3], [4, 4, 4], [5, 5, 5], [6, 6, 6], [7, 7, 7], [8, 8, 8]], duration: None };
         let lines = thumb_lines(&thumb);
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].spans.len(), 2);

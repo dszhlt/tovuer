@@ -8,7 +8,7 @@ use tovuer_voice::Sound;
 
 use super::model::ChannelState;
 use super::overlay::{Overlay, Peek};
-use super::{App, Conn, Effect, Focus, LoginField, Me, Screen, ThumbState, Tone, Transfer};
+use super::{App, Conn, Effect, Focus, LoginField, Me, Screen, SharpThumb, ThumbState, Tone, Transfer};
 use crate::net::NetEvent;
 use crate::transfer::{Remote, TaskEvent};
 
@@ -414,6 +414,16 @@ impl App {
                     }
                 }
             }
+            TaskEvent::SharpThumb { file_id, cells, result } => {
+                if matches!(self.sharp_thumbs.get(&file_id), Some(SharpThumb::Loading(c)) if *c == cells) {
+                    let state = match result {
+                        Ok(sharp) => SharpThumb::Ready(sharp),
+                        // the blocks stay; the viewer says what is wrong if opened
+                        Err(_) => SharpThumb::Failed,
+                    };
+                    self.sharp_thumbs.insert(file_id, state);
+                }
+            }
             TaskEvent::Opened { name, result } => {
                 self.transfers.retain(|t| t.upload || t.name != name);
                 match result {
@@ -432,11 +442,11 @@ impl App {
                     }
                 }
             }
-            TaskEvent::Peek { path, result } => {
+            TaskEvent::Peek { path, result, sharp } => {
                 if let Some(Overlay::Picker(picker)) = self.overlay.as_mut()
                     && picker.peek.as_ref().is_some_and(|(p, _)| *p == path)
                 {
-                    picker.peek = Some((path, result.map(Peek::Ready).unwrap_or(Peek::Failed)));
+                    picker.peek = Some((path, result.map(|thumb| Peek::Ready(thumb, sharp)).unwrap_or(Peek::Failed)));
                 }
             }
             TaskEvent::UpdateProgress { got, total } => self.updating = Some((got, total)),

@@ -9,7 +9,7 @@ use ratatui::widgets::Widget;
 use super::icons::{Icon, Icons};
 use super::text::{clip, clip_left, width, wrap};
 use super::theme::{Theme, blend};
-use super::{centered, fill, frame, meter, put, put_center, put_line, put_right, spinner, tone_color};
+use super::{Spot, SpotImage, cells_hash, centered, fill, frame, meter, put, put_center, put_line, put_right, spinner, tone_color};
 use crate::app::commands::COMMANDS;
 use crate::app::emoji::QUICK;
 use crate::app::input::Input;
@@ -293,14 +293,14 @@ fn help_lines(t: &Theme, w: usize) -> Vec<Line<'static>> {
         Line::default(),
         head("VOICE"),
         row("Enter on a channel", "join or leave a voice channel"),
-        row("Alt+M", "microphone (or just M on an empty line)"),
+        row("Alt+M", "microphone (also m in the channel list)"),
         row("Alt+D", "sound: hear no one and stay silent"),
         Line::default(),
         head("MESSAGES  (Shift+Tab from the input)"),
         row("↑ ↓", "pick a message"),
         row("r · e · d", "reply · edit · delete"),
         row("a", "add a reaction"),
-        row("Enter · s", "open a file or picture · save it"),
+        row("Enter · s", "open a picture, a video (in your player) or a file · save it"),
         row("o", "open in your system's app (a photo in full quality)"),
         row("y", "copy the text"),
         Line::default(),
@@ -563,8 +563,8 @@ fn style_window(buf: &mut Buffer, area: Rect, app: &mut App, view: &mut StyleVie
     footer(buf, boxed, "↑↓ — pick · ←→ — change · Enter — your own · Esc", &t);
 }
 
-/// Draw a picture from half blocks, centered in `area`.
-fn paint_thumb(buf: &mut Buffer, area: Rect, thumb: &Thumb) {
+/// Draw a picture from half blocks, centered in `area`; returns where.
+fn paint_thumb(buf: &mut Buffer, area: Rect, thumb: &Thumb) -> Rect {
     let x0 = area.x + area.width.saturating_sub(thumb.w) / 2;
     let y0 = area.y + area.height.saturating_sub(thumb.rows()) / 2;
     for row in 0..thumb.rows().min(area.height) {
@@ -574,6 +574,7 @@ fn paint_thumb(buf: &mut Buffer, area: Rect, thumb: &Thumb) {
             put(buf, x0 + x, y0 + row, "▀", style, 1);
         }
     }
+    Rect::new(x0, y0, thumb.w.min(area.width), thumb.rows().min(area.height))
 }
 
 fn file_icon(icons: Icons, name: &str, dir: bool) -> &'static str {
@@ -581,6 +582,8 @@ fn file_icon(icons: Icons, name: &str, dir: bool) -> &'static str {
         Icon::Folder
     } else if tovuer_proto::is_image_name(name) {
         Icon::Picture
+    } else if tovuer_proto::is_video_name(name) {
+        Icon::Video
     } else {
         Icon::File
     })
@@ -649,7 +652,22 @@ fn picker_window(buf: &mut Buffer, area: Rect, app: &mut App, picker: &mut Picke
         let pane = Rect::new(list.right() + 1, list.y, preview_w - 1, list.height);
         super::vrule(buf, list.right(), list.y, list.height, Style::new().fg(t.line).bg(t.raised));
         match &picker.peek {
-            Some((_, Peek::Ready(thumb))) => paint_thumb(buf, pane, thumb),
+            Some((_, Peek::Ready(thumb, sharp))) => {
+                let rect = paint_thumb(buf, pane, thumb);
+                if let Some(seconds) = thumb.duration
+                    && rect.bottom() < pane.bottom()
+                {
+                    let length = crate::app::model::clock(std::time::Duration::from_secs(seconds as u64));
+                    put_center(buf, pane, rect.bottom(), &length, Style::new().fg(t.dim).bg(t.raised));
+                }
+                // real pixels over the blocks at the end of the frame, if the
+                // whole picture fits and nothing covers it
+                if let Some(sharp) = sharp.clone().filter(|_| app.sharp_pictures())
+                    && (rect.width, rect.height) == (thumb.w, thumb.rows())
+                {
+                    app.ui.spots.push(Spot { image: SpotImage::Ready(sharp), rect, cells: cells_hash(buf, rect) });
+                }
+            }
             Some((_, Peek::Loading)) => put_center(buf, pane, pane.y + pane.height / 2, &format!("{} preview…", spinner(app.frame)), Style::new().fg(t.faint).bg(t.raised)),
             Some((_, Peek::Failed)) => put_center(buf, pane, pane.y + pane.height / 2, "no preview", Style::new().fg(t.faint).bg(t.raised)),
             None => {

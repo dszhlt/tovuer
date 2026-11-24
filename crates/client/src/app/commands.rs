@@ -44,7 +44,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     cmd(&["theme"], "[name|next]", "change the color theme"),
     cmd(&["transparent"], "[on|off]", "transparent background"),
     cmd(&["previews"], "[on|off]", "picture thumbnails in the chat"),
-    cmd(&["sharp"], "[on|off]", "real pixels in the picture viewer (sixel/kitty)"),
+    cmd(&["sharp"], "[on|off]", "real pixels for pictures in the feed and the viewer (sixel/kitty)"),
     cmd(&["style"], "", "how your messages look: color, gradient, markup (F4)"),
     cmd(&["color", "colour"], "[name|#rrggbb|off]", "the color of your messages"),
     cmd(&["gradient"], "[name|#hex #hex…|off]", "a gradient for your messages: sunset, neon, rainbow…"),

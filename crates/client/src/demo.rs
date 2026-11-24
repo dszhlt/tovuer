@@ -85,7 +85,7 @@ pub fn picture(w: u32, h: u32) -> Picture {
             rgb.extend_from_slice(&[r.clamp(0.0, 255.0) as u8, g.clamp(0.0, 255.0) as u8, b.clamp(0.0, 255.0) as u8]);
         }
     }
-    Picture { w, h, rgb, full: (w, h) }
+    Picture { w, h, rgb, full: (w, h), duration: None }
 }
 
 pub const IMAGE_ID: &str = "0123456789abcdef0123456789abcdef";

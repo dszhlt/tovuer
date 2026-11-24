@@ -650,10 +650,14 @@ fn voice_presence_follows_keys_and_server() {
     assert!(h.app.muted());
     h.chord(KeyCode::Char('d'), KeyModifiers::ALT);
     assert_eq!(h.sent(), vec![ClientMsg::VoiceState { muted: true, deafened: true }]);
-    // unmuting the mic while deafened brings the sound back too
+    // a plain m is a letter, even on an empty line
     h.key(KeyCode::Char('m'));
+    assert!(h.sent().is_empty() && h.app.muted());
+    assert_eq!(h.app.input.text(), "m");
+    h.key(KeyCode::Backspace);
+    // unmuting the mic while deafened brings the sound back too
+    h.chord(KeyCode::Char('m'), KeyModifiers::ALT);
     assert_eq!(h.sent(), vec![ClientMsg::VoiceState { muted: false, deafened: false }]);
-    assert!(h.app.input.is_empty(), "a lone M on an empty line is a hotkey, not a letter");
 
     // in the channel list Enter on a voice channel joins or leaves
     h.key(KeyCode::Tab);
@@ -680,15 +684,23 @@ fn voice_presence_follows_keys_and_server() {
 }
 
 #[test]
-fn quick_keys_can_be_turned_off() {
+fn letters_always_type_and_the_microphone_is_alt_m() {
     let mut h = Harness::online("quick");
-    h.app.settings.quick_keys = false;
-    h.typed("m");
-    assert_eq!(h.app.input.text(), "m");
+    // a message may start with any letter: on an empty line too
+    h.typed("Mm");
+    assert_eq!(h.app.input.text(), "Mm");
     assert!(!h.app.muted());
     h.key(KeyCode::Backspace);
-    h.app.settings.quick_keys = true;
+    h.key(KeyCode::Backspace);
     h.typed("u");
+    assert_eq!(h.app.input.text(), "u");
+    assert!(h.app.overlay.is_none());
+    h.key(KeyCode::Backspace);
+    h.chord(KeyCode::Char('m'), KeyModifiers::ALT);
+    assert!(h.app.muted(), "Alt+M works while typing");
+    h.chord(KeyCode::Char('m'), KeyModifiers::ALT);
+    assert!(!h.app.muted());
+    h.key(KeyCode::F(3));
     assert!(matches!(h.app.overlay, Some(Overlay::Users { .. })));
     // in the volume window: arrows change the volume, Enter mutes
     h.key(KeyCode::Left);
@@ -983,6 +995,171 @@ fn the_viewer_draws_real_pixels_when_the_terminal_can() {
     show(&mut h);
     let buf = draw(&mut h);
     assert!(has_blocks(&buf) && !has_sixel(&buf));
+}
+
+#[test]
+fn feed_pictures_get_real_pixels_when_wholly_in_view() {
+    use std::sync::Arc;
+    use ratatui::buffer::CellDiffOption;
+    use ratatui_image::picker::{Picker, ProtocolType};
+    use tovuer::app::SharpThumb;
+    use tovuer::transfer::Sharp;
+
+    let mut h = Harness::online("feed-sharp");
+    let draw = |h: &mut Harness| {
+        let area = Rect::new(0, 0, 120, 30);
+        let mut buf = Buffer::empty(area);
+        ui::render(&mut buf, area, &mut h.app);
+        buf
+    };
+    let sixel_at = |buf: &Buffer| buf.content().iter().position(|c| c.symbol().contains("\x1bP"));
+    // blocks the terminal gets: under a picture they stay in the buffer, unsent
+    let has_blocks = |buf: &Buffer| buf.content().iter().any(|c| c.symbol() == "▀" && c.diff_option != CellDiffOption::Skip);
+
+    // blocks only: nothing is asked for
+    assert!(has_blocks(&draw(&mut h)) && h.app.ui.want_sharp_thumbs.is_empty());
+
+    // Sixel: the thumbnail is asked for at its size in cells, blocks meanwhile
+    let mut graphics = Picker::halfblocks();
+    graphics.set_protocol_type(ProtocolType::Sixel);
+    h.app.graphics = Some(graphics.clone());
+    assert!(has_blocks(&draw(&mut h)));
+    let (file, cells) = h.app.ui.want_sharp_thumbs.pop().expect("the feed asks for a sharp thumbnail");
+    assert_eq!(file.id, demo::IMAGE_ID);
+    assert!(cells.0 > 10 && cells.1 > 3, "{cells:?}");
+    h.app.sharp_thumbs.insert(file.id.clone(), SharpThumb::Loading(cells));
+    draw(&mut h);
+    assert!(h.app.ui.want_sharp_thumbs.is_empty(), "not asked twice while it is encoded");
+
+    let img = demo::picture(480, 270).into_image().unwrap();
+    let sharp = Sharp::encode_filled(&img, &graphics, cells.0, cells.1).unwrap();
+    assert_eq!(sharp.size(), cells, "it covers exactly the thumbnail's cells");
+    h.app.on_task(TaskEvent::SharpThumb { file_id: file.id.clone(), cells, result: Ok(Arc::new(sharp)) });
+    let buf = draw(&mut h);
+    let at = sixel_at(&buf).expect("real pixels in the feed");
+    assert!(!has_blocks(&buf), "they replace the blocks");
+    draw(&mut h);
+    assert!(!h.app.ui.repaint, "nothing moved");
+
+    // the feed scrolls by a line: the picture moves, the old one must not stay
+    let current = h.app.current;
+    h.app.channels[current].scroll += 1;
+    let buf = draw(&mut h);
+    assert!(std::mem::take(&mut h.app.ui.repaint));
+    assert_eq!(sixel_at(&buf), Some(at + 120), "one line lower");
+
+    // a window over the feed: blocks under it, no picture on top of the window
+    h.chord(KeyCode::Char('k'), KeyModifiers::CONTROL);
+    assert!(matches!(h.app.overlay, Some(Overlay::Palette(_))));
+    let buf = draw(&mut h);
+    assert!(sixel_at(&buf).is_none() && std::mem::take(&mut h.app.ui.repaint));
+    h.key(KeyCode::Esc);
+    assert!(sixel_at(&draw(&mut h)).is_some(), "back once the window is closed");
+
+    // a short window, scrolled line by line: a picture cut by an edge shows
+    // as blocks, a whole one in real pixels — never both
+    let (mut cut, mut whole) = (0, 0);
+    for scroll in 0..40 {
+        h.app.channels[current].scroll = scroll;
+        h.app.channels[current].anchor = None; // or it holds the view in place
+        let area = Rect::new(0, 0, 120, 18);
+        let mut buf = Buffer::empty(area);
+        ui::render(&mut buf, area, &mut h.app);
+        match (sixel_at(&buf).is_some(), has_blocks(&buf)) {
+            (true, true) => panic!("blocks and pixels at once, scroll {scroll}"),
+            (true, false) => whole += 1,
+            (false, true) => cut += 1,
+            (false, false) => {}
+        }
+    }
+    assert!(cut > 0 && whole > 0, "cut {cut}, whole {whole}");
+}
+
+#[test]
+fn the_file_picker_previews_pictures_in_real_pixels() {
+    use std::sync::Arc;
+    use ratatui_image::picker::{Picker, ProtocolType};
+    use tovuer::app::overlay::Peek;
+    use tovuer::transfer::Sharp;
+
+    let mut h = Harness::online("picker-sharp");
+    let dir = h.dir.join("pics");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("a.png"), b"not really a picture").unwrap();
+    std::fs::write(dir.join("b.txt"), b"text").unwrap();
+    h.app.ui.last_dir = Some(dir.clone());
+    let mut graphics = Picker::halfblocks();
+    graphics.set_protocol_type(ProtocolType::Sixel);
+    h.app.graphics = Some(graphics.clone());
+    let draw = |h: &mut Harness| {
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        ui::render(&mut buf, area, &mut h.app);
+        buf
+    };
+    let has_sixel = |buf: &Buffer| buf.content().iter().any(|c| c.symbol().contains("\x1bP"));
+
+    h.chord(KeyCode::Char('o'), KeyModifiers::CONTROL);
+    let Some(Overlay::Picker(picker)) = &h.app.overlay else { panic!("the picker opens") };
+    assert!(matches!(picker.peek, Some((ref p, Peek::Loading)) if *p == dir.join("a.png")));
+
+    // the preview comes as blocks and in the terminal's graphics, same cells
+    let thumb = demo::picture(480, 270).fit(40, 16);
+    let img = demo::picture(480, 270).into_image().unwrap();
+    let sharp = Sharp::encode_filled(&img, &graphics, thumb.w, thumb.rows()).unwrap();
+    h.app.on_task(TaskEvent::Peek { path: dir.join("a.png"), result: Ok(thumb), sharp: Some(Arc::new(sharp)) });
+    assert!(has_sixel(&draw(&mut h)), "real pixels in the preview");
+    draw(&mut h);
+    assert!(!h.app.ui.repaint);
+
+    // off a picture: it goes, and the screen is repainted so no ghost stays
+    h.key(KeyCode::Down);
+    let buf = draw(&mut h);
+    assert!(!has_sixel(&buf) && std::mem::take(&mut h.app.ui.repaint));
+}
+
+#[test]
+fn videos_show_a_frame_and_their_length_and_play_outside() {
+    let mut h = Harness::online("video");
+    let clip = tovuer_proto::FileMeta { id: "cd".repeat(16), name: "clip.mp4".into(), size: 2_400_000, image: false };
+    h.server(ServerMsg::Msg {
+        msg: Message {
+            id: 40,
+            channel: "general".into(),
+            from: "kate".into(),
+            ts: tovuer_proto::now_ms(),
+            text: String::new(),
+            reply: None,
+            edited: None,
+            file: Some(clip.clone()),
+            reactions: Vec::new(),
+            system: false,
+            style: None,
+        },
+    });
+
+    // no ffmpeg: an ordinary file, nothing is fetched for it
+    h.screen(120, 40);
+    assert!(!h.app.ui.want_thumbs.iter().any(|f| f.id == clip.id));
+
+    // with ffmpeg: a frame is wanted, then shown with the video's length
+    h.app.video = true;
+    h.app.ui.invalidate();
+    let text = h.screen(120, 40);
+    assert!(text.contains("loading the preview"), "{text}");
+    assert!(h.app.ui.want_thumbs.iter().any(|f| f.id == clip.id));
+    let mut thumb = demo::picture(320, 180).fit(tovuer::transfer::THUMB_COLS, tovuer::transfer::THUMB_ROWS);
+    thumb.duration = Some(42);
+    h.app.on_task(TaskEvent::Thumb { file_id: clip.id.clone(), result: Ok(thumb) });
+    let text = h.screen(120, 40);
+    assert!(text.contains("clip.mp4  2.3 MB · 0:42"), "{text}");
+    assert!(text.contains("▀▀▀▀"), "the frame is drawn:\n{text}");
+
+    // Enter plays it in the system's player instead of downloading it
+    h.key(KeyCode::BackTab);
+    assert_eq!(h.app.focus, Focus::Messages);
+    h.key(KeyCode::Enter);
+    assert!(h.last_toast().1.contains("cannot open the file"), "no node in a test, so it says why: {:?}", h.last_toast());
 }
 
 #[test]

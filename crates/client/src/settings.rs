@@ -53,8 +53,6 @@ pub struct Settings {
     /// The online panel on the right.
     pub members: bool,
     pub mouse: bool,
-    /// M and U on an empty input — mute the microphone and the volume menu.
-    pub quick_keys: bool,
 }
 
 impl Default for Settings {
@@ -85,7 +83,6 @@ impl Default for Settings {
             styles: 2,
             members: true,
             mouse: false,
-            quick_keys: true,
         }
     }
 }
@@ -303,7 +300,7 @@ mod tests {
         std::fs::write(paths.settings_file(), r#"{"theme":"mono","future":42}"#).unwrap();
         let loaded = paths.load_settings();
         assert_eq!(loaded.theme, "mono");
-        assert!(loaded.denoise && loaded.quick_keys);
+        assert!(loaded.denoise && loaded.previews);
 
         std::fs::write(paths.settings_file(), "not json").unwrap();
         assert_eq!(paths.load_settings(), Settings::default());

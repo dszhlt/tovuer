@@ -13,11 +13,15 @@ use crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste, EnableFocusChange, EnableMouseCapture, Event,
     EventStream, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
-use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, SetTitle, disable_raw_mode, enable_raw_mode};
+use crossterm::terminal::{
+    BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen, SetTitle, disable_raw_mode, enable_raw_mode,
+};
 use crossterm::{clipboard::CopyToClipboard, execute};
 use futures_util::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 use tokio::sync::mpsc;
 use tovuer::app::{App, Effect, Launch};
 use tovuer::net::{self, NetHandle, NodeSetup};
@@ -223,6 +227,7 @@ async fn run(args: Args) -> anyhow::Result<Option<PathBuf>> {
     }
 
     app.icons = tovuer::ui::icons::Icons::detect();
+    app.video = transfer::video_previews_available();
     let mut tui = Tui::enter(app.settings.mouse, &paths.cache)?;
     // asking the terminal which graphics it has must happen before input is read
     app.graphics = transfer::detect_graphics();
@@ -244,10 +249,27 @@ async fn run(args: Args) -> anyhow::Result<Option<PathBuf>> {
         loop {
             if app.dirty {
                 app.dirty = false;
+                // A Sixel picture on screen that moved or got covered needs the
+                // whole screen repainted (ui::watch_fragile). A dry run into
+                // memory tells before anything is sent, so pictures go out
+                // once, and the clear and the new screen show as one frame
+                // where the terminal knows synchronized output.
+                let mut repaint = false;
+                if app.ui.fragile.is_some() {
+                    let size = tui.terminal.size()?;
+                    let area = Rect::new(0, 0, size.width, size.height);
+                    ui::render(&mut Buffer::empty(area), area, &mut app);
+                    repaint = std::mem::take(&mut app.ui.repaint);
+                }
+                if repaint {
+                    // not terminal.clear(): it asks the terminal where the
+                    // cursor is and fails when no answer comes
+                    execute!(tui.terminal.backend_mut(), BeginSynchronizedUpdate, Clear(ClearType::All))?;
+                    tui.terminal.swap_buffers(); // nothing on screen: draw it all
+                }
                 tui.terminal.draw(|frame| ui::draw(frame, &mut app))?;
-                if std::mem::take(&mut app.ui.repaint) {
-                    tui.terminal.clear()?;
-                    tui.terminal.draw(|frame| ui::draw(frame, &mut app))?;
+                if repaint {
+                    execute!(tui.terminal.backend_mut(), EndSynchronizedUpdate)?;
                 }
                 app.fetch_wanted_thumbs();
             }

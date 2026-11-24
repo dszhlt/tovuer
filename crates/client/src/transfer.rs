@@ -21,6 +21,9 @@ pub const THUMB_COLS: u16 = 36;
 pub const THUMB_ROWS: u16 = 9;
 /// Bigger pictures are not fetched automatically for a preview.
 pub const AUTO_PREVIEW_LIMIT: u64 = 8 << 20;
+/// Videos up to this size are fetched for a frame to preview (files are
+/// at most 50 MB anyway).
+pub const VIDEO_PREVIEW_LIMIT: u64 = 64 << 20;
 /// Pictures are not kept bigger than this — a terminal cannot show more pixels.
 const PICTURE_MAX_SIDE: u32 = 900;
 
@@ -36,10 +39,13 @@ pub enum TaskEvent {
     Picture { file_id: String, name: String, result: Result<Arc<Picture>, String> },
     /// The picture encoded for the terminal's own graphics, for a viewer of `area` cells.
     Sharp { file_id: String, area: (u16, u16), result: Result<Arc<Sharp>, String> },
+    /// A feed thumbnail encoded for the terminal's own graphics, `cells` in size.
+    SharpThumb { file_id: String, cells: (u16, u16), result: Result<Arc<Sharp>, String> },
     /// A file handed to the system's own app (an image viewer, a PDF reader…).
     Opened { name: String, result: Result<(), String> },
     /// Preview of the picture under the file picker's cursor.
-    Peek { path: PathBuf, result: Result<Thumb, String> },
+    /// …and the same in the terminal's own graphics, when asked for.
+    Peek { path: PathBuf, result: Result<Thumb, String>, sharp: Option<Arc<Sharp>> },
     UpdateProgress { got: u64, total: u64 },
     /// `Ok(None)` — already the latest; `Ok(Some((exe, version)))` — replaced, time to restart.
     UpdateDone(Result<Option<(PathBuf, String)>, String>),
@@ -58,6 +64,8 @@ pub struct Picture {
     pub rgb: Vec<u8>,
     /// The size of the original, before it was scaled down for the screen.
     pub full: (u32, u32),
+    /// A frame of a video this long, in seconds (if known).
+    pub duration: Option<u32>,
 }
 
 /// A picture shrunk to cells: each text line is two pixel rows ("▀").
@@ -67,6 +75,8 @@ pub struct Thumb {
     /// Height in pixel rows, always even.
     pub h: u16,
     pub px: Vec<[u8; 3]>,
+    /// A frame of a video this long, in seconds (if known).
+    pub duration: Option<u32>,
 }
 
 impl Thumb {
@@ -124,7 +134,12 @@ impl Picture {
         let (w, h) = rgba.dimensions();
         let backdrop = BACKDROP.map(|c| c as u8);
         let rgb = rgba.pixels().flat_map(|p| blend(*p, backdrop)).collect();
-        Ok(Self { w, h, rgb, full })
+        Ok(Self { w, h, rgb, full, duration: None })
+    }
+
+    /// As an image, for encoding.
+    pub fn into_image(self) -> Result<DynamicImage, String> {
+        image::RgbImage::from_raw(self.w, self.h, self.rgb).map(DynamicImage::ImageRgb8).ok_or_else(|| "a broken picture".to_string())
     }
 
     /// Fit into `cols`×`rows` cells keeping the proportions (averaging blocks).
@@ -157,7 +172,7 @@ impl Picture {
                 px.push([channel(0), channel(1), channel(2)]);
             }
         }
-        Thumb { w: w as u16, h: h as u16, px }
+        Thumb { w: w as u16, h: h as u16, px, duration: self.duration }
     }
 }
 
@@ -212,6 +227,19 @@ impl Sharp {
         let size = ratatui::layout::Size::new(cells_w as u16, cells_h as u16);
         let proto = graphics
             .new_protocol(DynamicImage::ImageRgb8(canvas), size, ratatui_image::Resize::Fit(None))
+            .map_err(|e| format!("cannot draw the picture: {e}"))?;
+        Ok(Self { proto, kind: graphics.protocol_type() })
+    }
+
+    /// Cover exactly `cols`×`rows` cells, cutting off what sticks out: a feed
+    /// thumbnail, whose cells already have the picture's proportions.
+    pub fn encode_filled(img: &DynamicImage, graphics: &Graphics, cols: u16, rows: u16) -> Result<Self, String> {
+        let font = graphics.font_size();
+        let (cols, rows) = (cols.max(1), rows.max(1));
+        let (w, h) = (cols as u32 * font.width.max(1) as u32, rows as u32 * font.height.max(1) as u32);
+        let filled = img.resize_to_fill(w, h, image::imageops::FilterType::CatmullRom);
+        let proto = graphics
+            .new_protocol(DynamicImage::ImageRgb8(filled.to_rgb8()), ratatui::layout::Size::new(cols, rows), ratatui_image::Resize::Fit(None))
             .map_err(|e| format!("cannot draw the picture: {e}"))?;
         Ok(Self { proto, kind: graphics.protocol_type() })
     }
@@ -290,6 +318,134 @@ fn spawn_err(e: tokio::task::JoinError) -> String {
     format!("internal error: {e}")
 }
 
+// ---------------------------------------------------------------- video
+
+/// The only containers ffmpeg may open for a preview. Files come from
+/// other people: no playlists, concatenation lists or network streams that
+/// would make it read other files or go online.
+const VIDEO_FORMATS: &str = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,ogg";
+
+/// Whether ffmpeg is installed: video previews come from it.
+pub fn video_previews_available() -> bool {
+    let mut cmd = std::process::Command::new("ffmpeg");
+    cmd.args(["-hide_banner", "-version"]);
+    run_for(cmd, std::time::Duration::from_secs(3), 1 << 16).is_ok()
+}
+
+/// Run a helper program and take what it prints; it is stopped after
+/// `limit`, and output past `max_out` bytes is not taken.
+fn run_for(mut cmd: std::process::Command, limit: std::time::Duration, max_out: u64) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| format!("cannot run ffmpeg: {e}"))?;
+    let stdout = child.stdout.take().ok_or("no output")?;
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        let _ = stdout.take(max_out).read_to_end(&mut out);
+        out
+    });
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let out = reader.join().unwrap_or_default();
+                return if status.success() { Ok(out) } else { Err("ffmpeg could not read the video".into()) };
+            }
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("the video took too long to read".into());
+            }
+        }
+    }
+}
+
+/// ffmpeg's name for a local file: never taken for a URL or an option.
+fn ffmpeg_input(path: &Path) -> std::ffi::OsString {
+    let mut input = std::ffi::OsString::from("file:");
+    input.push(path.as_os_str());
+    input
+}
+
+/// How long a video is, in seconds.
+fn video_duration(path: &Path) -> Option<f64> {
+    let mut cmd = std::process::Command::new("ffprobe");
+    cmd.args(["-v", "error", "-protocol_whitelist", "file", "-format_whitelist", VIDEO_FORMATS])
+        .args(["-show_entries", "format=duration", "-of", "default=nw=1:nk=1"])
+        .arg(ffmpeg_input(path));
+    let out = run_for(cmd, std::time::Duration::from_secs(10), 4096).ok()?;
+    String::from_utf8_lossy(&out).trim().parse::<f64>().ok().filter(|d| d.is_finite() && *d >= 0.0)
+}
+
+/// A frame from a little into the video (the very first is often black),
+/// with a play mark on it.
+pub fn video_frame(path: &Path) -> Result<Picture, String> {
+    let duration = video_duration(path);
+    let at = duration.map_or(0.0, |d| (d * 0.1).min(3.0));
+    let frame = |at: f64| {
+        let mut cmd = std::process::Command::new("ffmpeg");
+        cmd.args(["-nostdin", "-v", "error", "-protocol_whitelist", "file", "-format_whitelist", VIDEO_FORMATS])
+            .args(["-ss", &format!("{at:.2}")])
+            .arg("-i")
+            .arg(ffmpeg_input(path))
+            .args(["-frames:v", "1", "-an", "-sn", "-dn"])
+            .args(["-vf", &format!("scale='min({PICTURE_MAX_SIDE},iw)':'min({PICTURE_MAX_SIDE},ih)':force_original_aspect_ratio=decrease")])
+            .args(["-f", "image2pipe", "-c:v", "png", "pipe:1"]);
+        run_for(cmd, std::time::Duration::from_secs(15), 32 << 20)
+    };
+    let mut png = frame(at)?;
+    if png.is_empty() && at > 0.0 {
+        png = frame(0.0)?; // the guess at the length was off
+    }
+    if png.is_empty() {
+        return Err("no picture in the video".into());
+    }
+    let mut pic = Picture::decode(&png)?;
+    pic.duration = duration.map(|d| d.round() as u32);
+    play_mark(&mut pic);
+    Ok(pic)
+}
+
+/// A round dark mark with a white triangle in the middle of a video frame.
+fn play_mark(pic: &mut Picture) {
+    let (w, h) = (pic.w as f32, pic.h as f32);
+    let r = (w.min(h) * 0.16).max(4.0);
+    let (cx, cy) = (w / 2.0, h / 2.0);
+    // the triangle: pointing right, a bit right of the center to look balanced
+    let (tl, tr, tt) = (cx - r * 0.32, cx + r * 0.48, r * 0.46);
+    for y in ((cy - r).max(0.0) as u32)..((cy + r).min(h) as u32) {
+        for x in ((cx - r).max(0.0) as u32)..((cx + r).min(w) as u32) {
+            let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
+            if dx * dx + dy * dy > r * r {
+                continue;
+            }
+            let fx = x as f32 + 0.5;
+            let half = tt * (1.0 - (fx - tl) / (tr - tl));
+            let inside = fx >= tl && fx <= tr && dy.abs() <= half;
+            let i = ((y * pic.w + x) * 3) as usize;
+            for c in 0..3 {
+                let v = pic.rgb[i + c] as f32;
+                pic.rgb[i + c] = if inside { 245 } else { (v * 0.45) as u8 };
+            }
+        }
+    }
+}
+
+/// A picture for a preview: decoded, or a frame of a video.
+async fn load_preview(path: PathBuf, video: bool) -> Result<Picture, String> {
+    if video {
+        tokio::task::spawn_blocking(move || video_frame(&path)).await.map_err(spawn_err)?
+    } else {
+        load_picture(path).await
+    }
+}
+
+/// Whether a shared file is shown as a video (pictures are marked by the sender).
+pub fn is_video(file: &FileMeta) -> bool {
+    !file.image && tovuer_proto::is_video_name(&file.name)
+}
+
 async fn load_picture(path: PathBuf) -> Result<Picture, String> {
     tokio::task::spawn_blocking(move || {
         let bytes = std::fs::read(&path).map_err(|e| format!("cannot read: {e}"))?;
@@ -365,7 +521,7 @@ impl Remote {
         tokio::spawn(async move {
             let result = async {
                 let path = me.cached(&file).await?;
-                Ok(load_picture(path).await?.fit(THUMB_COLS, THUMB_ROWS))
+                Ok(load_preview(path, is_video(&file)).await?.fit(THUMB_COLS, THUMB_ROWS))
             }
             .await;
             let _ = me.events.send(TaskEvent::Thumb { file_id: file.id, result });
@@ -405,6 +561,22 @@ impl Remote {
         });
     }
 
+    /// Encode a feed thumbnail for the terminal's graphics, `cells` in size.
+    /// The screen-sized copy of the picture is plenty for it.
+    pub fn sharp_thumb(&self, file: FileMeta, graphics: Graphics, cells: (u16, u16)) {
+        let me = self.clone();
+        tokio::spawn(async move {
+            let result = async {
+                let pic = load_preview(me.cached(&file).await?, is_video(&file)).await?;
+                tokio::task::spawn_blocking(move || Sharp::encode_filled(&pic.into_image()?, &graphics, cells.0, cells.1).map(Arc::new))
+                    .await
+                    .map_err(spawn_err)?
+            }
+            .await;
+            let _ = me.events.send(TaskEvent::SharpThumb { file_id: file.id, cells, result });
+        });
+    }
+
     /// Open the original file with the system's app (an image viewer for a
     /// picture), fetching it first if needed.
     pub fn open_outside(&self, file: FileMeta) {
@@ -431,10 +603,27 @@ impl Remote {
 }
 
 /// Preview of a local picture (for the file picker).
-pub fn peek(events: Events, path: PathBuf, cols: u16, rows: u16) {
+pub fn peek(events: Events, path: PathBuf, cols: u16, rows: u16, graphics: Option<Graphics>) {
     tokio::spawn(async move {
-        let result = load_picture(path.clone()).await.map(|p| p.fit(cols, rows));
-        let _ = events.send(TaskEvent::Peek { path, result });
+        let video = path.file_name().is_some_and(|n| tovuer_proto::is_video_name(&n.to_string_lossy()));
+        let (result, sharp) = match load_preview(path.clone(), video).await {
+            Ok(pic) => {
+                let thumb = pic.fit(cols, rows);
+                let cells = (thumb.w, thumb.rows());
+                let sharp = match graphics {
+                    // the same cells as the blocks, from the same decoded picture
+                    Some(g) => tokio::task::spawn_blocking(move || Sharp::encode_filled(&pic.into_image()?, &g, cells.0, cells.1))
+                        .await
+                        .ok()
+                        .and_then(Result::ok)
+                        .map(Arc::new),
+                    None => None,
+                };
+                (Ok(thumb), sharp)
+            }
+            Err(e) => (Err(e), None),
+        };
+        let _ = events.send(TaskEvent::Peek { path, result, sharp });
     });
 }
 
@@ -635,7 +824,7 @@ mod tests {
                 rgb.extend_from_slice(&[v, 0, 255 - v]);
             }
         }
-        Picture { w, h, rgb, full: (w, h) }
+        Picture { w, h, rgb, full: (w, h), duration: None }
     }
 
     #[test]
@@ -681,7 +870,7 @@ mod tests {
                 rgb.extend_from_slice(if x < 10 { &[200, 0, 0] } else { &[0, 0, 200] });
             }
         }
-        let t = Picture { w: 20, h: 10, rgb, full: (20, 10) }.fit(2, 1);
+        let t = Picture { w: 20, h: 10, rgb, full: (20, 10), duration: None }.fit(2, 1);
         assert_eq!((t.w, t.h), (2, 2));
         assert_eq!(t.at(0, 0), [200, 0, 0]);
         assert_eq!(t.at(1, 1), [0, 0, 200]);
@@ -772,6 +961,49 @@ mod tests {
         assert_eq!((upright.width(), upright.height()), (2, 4));
         let pic = Picture::decode(&marked).unwrap();
         assert_eq!((pic.w, pic.h, pic.full), (2, 4, (2, 4)));
+    }
+
+    #[test]
+    fn a_video_frame_gets_a_play_mark() {
+        let mut pic = Picture { w: 100, h: 60, rgb: vec![200; 100 * 60 * 3], full: (100, 60), duration: None };
+        play_mark(&mut pic);
+        let at = |x: u32, y: u32| pic.rgb[((y * 100 + x) * 3) as usize];
+        assert_eq!(at(51, 30), 245, "the triangle in the middle is white");
+        assert!(at(44, 30) < 100, "around it the frame is darkened");
+        assert_eq!(at(2, 2), 200, "the corners stay as they were");
+    }
+
+    /// Needs ffmpeg; without it there is nothing to check.
+    #[test]
+    fn videos_give_a_frame_and_disguised_files_are_refused() {
+        if !video_previews_available() {
+            eprintln!("ffmpeg is not installed: skipped");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("tovuer-video-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("clip.mp4");
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=duration=5:size=320x180:rate=10", "-pix_fmt", "yuv420p"])
+            .arg(&clip)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let pic = video_frame(&clip).unwrap();
+        assert_eq!((pic.w, pic.h), (320, 180));
+        assert_eq!(pic.duration, Some(5));
+        assert_eq!(pic.fit(THUMB_COLS, THUMB_ROWS).duration, Some(5), "the thumbnail knows the length");
+
+        // a playlist calling itself a video would make ffmpeg go online
+        let playlist = dir.join("evil.mp4");
+        std::fs::write(&playlist, "#EXTM3U\n#EXTINF:1,\nhttp://127.0.0.1:9/x.ts\n#EXT-X-ENDLIST\n").unwrap();
+        assert!(video_frame(&playlist).is_err());
+        // a concatenation list would read other files
+        let list = dir.join("evil.mkv");
+        std::fs::write(&list, "ffconcat version 1.0\nfile '/etc/hostname'\n").unwrap();
+        assert!(video_frame(&list).is_err());
+        assert!(video_frame(&dir.join("missing.mp4")).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
