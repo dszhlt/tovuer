@@ -1616,7 +1616,10 @@ fn call_video_gets_real_pixels_frame_after_frame() {
         Arc::new(sharp)
     };
     h.app.call.sharp.entry(2).or_default().busy = true;
+    h.app.call.fresh = false;
+    h.app.dirty = false;
     h.app.on_task(TaskEvent::SharpVideo { user: 2, seq: 1, cells, result: Ok(encode(&frame)) });
+    assert!(h.app.call.fresh && !h.app.dirty, "a finished tile is presented on the video tick");
     let buf = draw(&mut h, 120, 32);
     assert_eq!(sixels(&buf), 1, "real pixels in bob's tile");
     draw(&mut h, 120, 32);

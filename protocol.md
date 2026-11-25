@@ -197,14 +197,14 @@ Each frame travels on a unidirectional stream of its own: the byte `V`, then
 ```
 
 A stream per frame means a late frame never holds up a newer one. The
-sender keeps at most four frames on their way to each peer; frames that come
+sender keeps at most six frames on their way to each peer; frames that come
 while all are travelling wait, and only the newest of them goes — a slow
 link gets fewer frames instead of growing lag. A camera is sent at up to
-480×360, 30 frames a second (about 300–450 KB/s per watcher); a screen at up
-to 1440×900, 45 frames a second (up to about 5 MB/s per watcher while it
-moves), and a screen frame identical to the last one is not sent again
-(only every 2 s, for whoever started watching), so a still screen costs
-next to nothing. The receiver drops frames from anyone it is
+480×360, 30 frames a second (about 300–450 KB/s per watcher). Screen sharing
+targets 60 frames a second at up to 1440×900. Bandwidth per watcher depends
+on the size of the JPEGs and how often the picture changes. The sender
+repeats a still frame every two seconds so new watchers can see it.
+The receiver drops frames from anyone it is
 not watching (in its call, or as the `stream` it chose — then a screen only),
 and a JPEG whose real size differs from the header.
 

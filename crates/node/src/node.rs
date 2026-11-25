@@ -52,9 +52,8 @@ const MAX_KNOWN_PEERS: usize = 64;
 /// Remote clocks further ahead than this do not drag ours along.
 const MAX_CLOCK_SKEW_MS: u64 = 5 * 60 * 1000;
 /// Video frames on their way to one peer at once: more wait, and only the
-/// newest of them goes — a slow link drops frames instead of lagging. Four
-/// keep 45 frames a second going over a link with a 90 ms round trip.
-const VIDEO_IN_FLIGHT: usize = 4;
+/// newest of them goes. At 60 fps, six slots cover a 90 ms round trip.
+const VIDEO_IN_FLIGHT: usize = 6;
 /// A frame not delivered by then is given up.
 const VIDEO_SEND_TIMEOUT: Duration = Duration::from_secs(3);
 const VIDEO_READ_TIMEOUT: Duration = Duration::from_secs(5);

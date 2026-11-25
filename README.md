@@ -44,9 +44,9 @@ and Windows.
   screen above the chat — no need to join the voice channel; write while
   you watch. `Alt+F` (or a click) spreads it over the whole window, `Alt+W`
   again goes to the next stream or stops.
-- A screen goes at 45 frames a second, up to 1440×900, a camera at 30;
-  when nothing on a screen moves, nothing is sent. The voice panel shows
-  the frame rate you are sending at.
+- Screen sharing targets 60 fps at up to 1440×900. Cameras run at up to 30 fps.
+  A still screen sends one frame every two seconds. The voice panel shows
+  the capture frame rate.
 - Video is real pixels where the terminal has graphics (Sixel, Kitty,
   iTerm2) and colored blocks elsewhere: a camera in half-blocks (two dots a
   cell, true colors), a screen in sextants (six dots a cell, so big text

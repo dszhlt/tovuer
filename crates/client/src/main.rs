@@ -249,16 +249,14 @@ async fn run(args: Args) -> anyhow::Result<Option<(PathBuf, Option<tovuer::app::
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(80));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    // video is drawn as frames come, but not more often than this (60 a
-    // second), counted from the start of the last draw
-    const VIDEO_GAP: Duration = Duration::from_millis(16);
-    let mut last_draw = tokio::time::Instant::now();
+    // Keep frame deadlines on the capture cadence even when a draw starts late.
+    let mut video_tick = tokio::time::interval(tovuer::video::SCREEN_FRAME_INTERVAL);
+    video_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let outcome: anyhow::Result<()> = async {
         loop {
             if app.dirty {
                 app.dirty = false;
-                last_draw = tokio::time::Instant::now();
                 // A Sixel picture on screen that moved or got covered needs the
                 // whole screen repainted (ui::watch_fragile). A dry run into
                 // memory tells before anything is sent, so pictures go out
@@ -292,15 +290,8 @@ async fn run(args: Args) -> anyhow::Result<Option<(PathBuf, Option<tovuer::app::
             if app.quit {
                 return Ok(());
             }
-            let video_due = app.call.fresh.then_some(last_draw + VIDEO_GAP);
-            let next_video = async {
-                match video_due {
-                    Some(at) => tokio::time::sleep_until(at).await,
-                    None => std::future::pending().await,
-                }
-            };
             tokio::select! {
-                _ = next_video => app.dirty = true,
+                _ = video_tick.tick(), if app.call.fresh => app.dirty = true,
                 event = events.next() => match event {
                     Some(Ok(Event::Key(key))) => app.on_key(key),
                     Some(Ok(Event::Paste(text))) => app.on_paste(text),

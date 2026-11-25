@@ -35,11 +35,11 @@ struct Profile {
 }
 
 const CAMERA: Profile = Profile { width: 480, height: 360, fps: 30, quality: 6 };
-/// A screen: smooth — 45 frames a second — at a size that still shows text.
-/// Frames that did not change are not sent, so a still screen costs nothing.
-const SCREEN: Profile = Profile { width: 1440, height: 900, fps: 45, quality: 5 };
-/// grim shots on their way at once: one takes about 25 ms, so a second one
-/// started halfway keeps 45 frames a second going.
+/// A shared screen keeps enough resolution for text and skips unchanged frames.
+const SCREEN: Profile = Profile { width: 1440, height: 900, fps: 60, quality: 5 };
+/// Time between screen captures and between video redraws.
+pub const SCREEN_FRAME_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / SCREEN.fps as u64);
+/// Overlap grim shots because one capture can take longer than a frame interval.
 const GRIM_WORKERS: usize = 2;
 /// A frame the same as the last one goes again only this often — for
 /// whoever started watching in the meantime.
@@ -596,14 +596,13 @@ fn stream(input: Vec<String>, p: &Profile, stop: &AtomicBool, slot: &Mutex<Optio
     Err(last_words(&said, fallback))
 }
 
-/// Wayland: grim screenshots, two on their way at once, one started every
-/// 1/45 s; each is waited for on a thread of its own and frames go out in
+/// Wayland: grim screenshots, two on their way at once, paced by the screen
+/// profile. Each is waited for on a thread of its own and frames go out in
 /// the order they were taken. grim scales the picture itself — quickly down
 /// to about 3/4, several times slower below that — so the screen is taken
 /// as large as a frame may be: full size up to 1440×900, a bit smaller above.
 fn grim_loop(output: Option<String>, stop: &AtomicBool, out: &mut Outbox) -> Result<(), String> {
     use std::sync::mpsc::{RecvTimeoutError, channel};
-    let every = Duration::from_micros(1_000_000 / SCREEN.fps as u64);
     // (which shot, the scale it was taken at, what grim gave)
     let (done, results) = channel::<(u64, f64, std::io::Result<std::process::Output>)>();
     let mut scale = 1.0f64;
@@ -629,7 +628,7 @@ fn grim_loop(output: Option<String>, stop: &AtomicBool, out: &mut Outbox) -> Res
             started += 1;
             on_the_way += 1;
             // late? go on from now rather than catch up in a burst
-            next = (next + every).max(Instant::now());
+            next = (next + SCREEN_FRAME_INTERVAL).max(Instant::now());
         }
         let wait = if on_the_way < GRIM_WORKERS { next.saturating_duration_since(Instant::now()) } else { Duration::from_secs(2) };
         match results.recv_timeout(wait) {

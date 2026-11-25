@@ -182,7 +182,11 @@ fn video(buf: &mut Buffer, r: Rect, app: &mut App, id: u32, frame: &VideoFrame) 
     let size = if fine { (cols as u32 * 2, rows as u32 * 3) } else { (w, h) };
     let fresh = app.ui.video.get(&id).is_some_and(|s| s.seq == frame.seq && s.size == size && s.mirror == mirror);
     if !fresh {
-        let mut pixels = image::imageops::resize(&frame.image, size.0, size.1, image::imageops::FilterType::Triangle);
+        let mut pixels = if frame.source == VideoSource::Screen && size.0 < frame.image.width() && size.1 < frame.image.height() {
+            image::imageops::thumbnail(&frame.image, size.0, size.1)
+        } else {
+            image::imageops::resize(&frame.image, size.0, size.1, image::imageops::FilterType::Triangle)
+        };
         if mirror {
             image::imageops::flip_horizontal_in_place(&mut pixels);
         }

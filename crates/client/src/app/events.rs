@@ -397,9 +397,9 @@ impl App {
     }
 
     pub fn on_task(&mut self, event: TaskEvent) {
-        // video comes many times a second: it waits for the next tick to be
-        // drawn (real pixels are drawn as soon as they are ready)
-        if !matches!(event, TaskEvent::Video { .. }) {
+        // A decoded frame and its terminal graphics can arrive separately.
+        // Draw the newest of both on the same video tick.
+        if !matches!(event, TaskEvent::Video { .. } | TaskEvent::SharpVideo { .. }) {
             self.dirty = true;
         }
         match event {
@@ -521,6 +521,7 @@ impl App {
             TaskEvent::SharpVideo { user, seq, result, .. } => {
                 if let Some(tile) = self.call.sharp.get_mut(&user) {
                     tile.busy = false;
+                    self.call.fresh = true;
                     match result {
                         Ok(sharp) => tile.ready = Some((seq, sharp)),
                         Err(e) => {
