@@ -120,6 +120,16 @@ impl Peer {
         }
     }
 
+    /// Wait until this peer knows someone as `want` describes: through an
+    /// update, or by meeting them already so (a peer that connects after a
+    /// change hears of it as a join, not an update).
+    async fn sees(&mut self, want: impl Fn(&User) -> bool) -> User {
+        match self.server(|m| matches!(m, ServerMsg::UserJoin { user } | ServerMsg::UserUpdate { user } if want(user))).await {
+            ServerMsg::UserJoin { user } | ServerMsg::UserUpdate { user } => user,
+            _ => unreachable!(),
+        }
+    }
+
     async fn joined(&mut self, nick: &str) -> User {
         match self.server(|m| matches!(m, ServerMsg::UserJoin { user } if user.name == nick)).await {
             ServerMsg::UserJoin { user } => user,
@@ -279,9 +289,9 @@ async fn voice_goes_straight_to_the_same_channel() {
     kate.node.send(ClientMsg::VoiceJoin { channel: "Gaming".into() });
     // everyone sees where everyone is
     for peer in [&mut dana, &mut kate] {
-        peer.server(|m| matches!(m, ServerMsg::UserUpdate { user } if user.name == "bob" && user.voice.as_deref() == Some("Lounge"))).await;
+        peer.sees(|user| user.name == "bob" && user.voice.as_deref() == Some("Lounge")).await;
     }
-    bob.server(|m| matches!(m, ServerMsg::UserUpdate { user } if user.name == "dana" && user.voice.as_deref() == Some("Lounge"))).await;
+    bob.sees(|user| user.name == "dana" && user.voice.as_deref() == Some("Lounge")).await;
 
     let dana_on_bob = bob.users.iter().find(|u| u.name == "dana").unwrap().id;
     let frame = tovuer_proto::voice::encode(0, 0, 7, &[1, 2, 3, 4]);
@@ -324,10 +334,10 @@ async fn video_goes_to_those_watching_the_same_channel() {
     bob.node.send(ClientMsg::Video { source: None, watching: true, stream: None });
     yana.node.send(ClientMsg::Video { source: None, watching: true, stream: None });
     for peer in [&mut bob, &mut kate, &mut yana] {
-        peer.server(|m| matches!(m, ServerMsg::UserUpdate { user } if user.name == "dana" && user.video == Some(VideoSource::Camera))).await;
+        peer.sees(|user| user.name == "dana" && user.video == Some(VideoSource::Camera)).await;
     }
-    dana.server(|m| matches!(m, ServerMsg::UserUpdate { user } if user.name == "bob" && user.voice.as_deref() == Some("Lounge"))).await;
-    dana.server(|m| matches!(m, ServerMsg::UserUpdate { user } if user.name == "yana" && user.voice.is_some())).await;
+    dana.sees(|user| user.name == "bob" && user.voice.as_deref() == Some("Lounge")).await;
+    dana.sees(|user| user.name == "yana" && user.voice.is_some()).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     let jpeg = [0xff, 0xd8, 7, 7, 7, 0xff, 0xd9];
@@ -354,7 +364,7 @@ async fn video_goes_to_those_watching_the_same_channel() {
 
     // leaving voice turns the camera off for everyone
     dana.node.send(ClientMsg::VoiceLeave);
-    bob.server(|m| matches!(m, ServerMsg::UserUpdate { user } if user.name == "dana" && user.voice.is_none() && user.video.is_none())).await;
+    bob.sees(|user| user.name == "dana" && user.voice.is_none() && user.video.is_none()).await;
 }
 
 #[tokio::test]
@@ -371,7 +381,7 @@ async fn a_shared_screen_can_be_watched_from_a_text_channel() {
     // oleg is in no voice channel: he watches kate's screen from the chat (any case of her nick)
     oleg.node.send(ClientMsg::Video { source: None, watching: false, stream: Some("KATE".into()) });
     for peer in [&mut oleg, &mut bob] {
-        peer.server(|m| matches!(m, ServerMsg::UserUpdate { user } if user.name == "kate" && user.video == Some(VideoSource::Screen))).await;
+        peer.sees(|user| user.name == "kate" && user.video == Some(VideoSource::Screen)).await;
     }
     tokio::time::sleep(Duration::from_millis(400)).await;
 
@@ -394,7 +404,7 @@ async fn a_shared_screen_can_be_watched_from_a_text_channel() {
 
     // a camera is for the call only, even to someone watching her screen
     kate.node.send(ClientMsg::Video { source: Some(VideoSource::Camera), watching: false, stream: None });
-    oleg.server(|m| matches!(m, ServerMsg::UserUpdate { user } if user.name == "kate" && user.video == Some(VideoSource::Camera))).await;
+    oleg.sees(|user| user.name == "kate" && user.video == Some(VideoSource::Camera)).await;
     let before = oleg.seen.lock().unwrap().len();
     let camera = tovuer_proto::video::encode(VideoSource::Camera, 2, 640, 480, &jpeg);
     for _ in 0..10 {
@@ -458,11 +468,11 @@ async fn channels_and_owner_powers() {
     bob.node.send(ClientMsg::ChannelCreate { name: "party".into(), kind: ChannelKind::Voice });
     dana.server(|m| matches!(m, ServerMsg::Channels { channels } if channels.iter().any(|c| c.name == "party" && c.kind == ChannelKind::Voice))).await;
     bob.node.send(ClientMsg::VoiceJoin { channel: "party".into() });
-    dana.server(|m| matches!(m, ServerMsg::UserUpdate { user } if user.name == "bob" && user.voice.as_deref() == Some("party"))).await;
+    dana.sees(|user| user.name == "bob" && user.voice.as_deref() == Some("party")).await;
     dana.node.send(ClientMsg::ChannelDelete { name: "party".into() });
     bob.server(|m| matches!(m, ServerMsg::Channels { channels } if !channels.iter().any(|c| c.name == "party"))).await;
-    bob.server(|m| matches!(m, ServerMsg::UserUpdate { user } if user.name == "bob" && user.voice.is_none())).await;
-    dana.server(|m| matches!(m, ServerMsg::UserUpdate { user } if user.name == "bob" && user.voice.is_none())).await;
+    bob.sees(|user| user.name == "bob" && user.voice.is_none()).await;
+    dana.sees(|user| user.name == "bob" && user.voice.is_none()).await;
 
     bob.say("oops");
     let oops = dana.message("oops").await;
