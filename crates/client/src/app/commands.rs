@@ -41,7 +41,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     cmd(&["vol"], "<nick> <0-200>", "someone's volume, in percent"),
     cmd(&["volume"], "<0-200>", "overall volume of others"),
     cmd(&["gain"], "<50-300>", "your microphone gain"),
-    cmd(&["denoise"], "[off|soft|normal|strong]", "noise suppression and how hard it works"),
+    cmd(&["denoise"], "[off|soft|normal|strong|ai]", "noise suppression; ai — a neural network, like Krisp"),
     cmd(&["agc"], "[on|off]", "automatic microphone level"),
     cmd(&["devices", "dev"], "", "list microphones, speakers and cameras"),
     cmd(&["mic"], "[name|default]", "pick a microphone; without a name — audio diagnostics"),
@@ -285,7 +285,7 @@ impl App {
                 if self.set_denoise_mode(&mode) {
                     self.ok(format!("noise suppression: {}", self.denoise_mode()));
                 } else {
-                    self.warn("usage: /denoise off|soft|normal|strong");
+                    self.warn("usage: /denoise off|soft|normal|strong|ai");
                 }
             }
             "animate" => {
@@ -513,6 +513,17 @@ impl App {
                 if self.muted() { " — the microphone is OFF" } else { "" }
             ),
         );
+        let noise = match (self.denoise_mode(), ctl.neural_state()) {
+            ("ai", Some(tovuer_voice::neural::State::Failed)) => "ai — the network would not load, RNNoise works instead".to_string(),
+            ("ai", Some(tovuer_voice::neural::State::Loading)) => "ai — the network is loading".to_string(),
+            ("ai", _) => format!(
+                "ai — the network cleaned {} pieces of 10 ms in time, {} were late (RNNoise took them)",
+                ctl.neural_answered.load(Ordering::Relaxed),
+                ctl.neural_missed.load(Ordering::Relaxed)
+            ),
+            (mode, _) => mode.to_string(),
+        };
+        self.note(Tone::Info, format!("noise suppression: {noise}"));
         if self.engine.running() && captured == 0 {
             self.note(Tone::Warn, "the microphone is open but sends no sound — pick another device in F2");
         }

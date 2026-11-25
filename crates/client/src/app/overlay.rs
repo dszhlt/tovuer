@@ -241,7 +241,7 @@ impl Setting {
             Setting::Styles => "how colors and gradients others picked show for you: flowing, still, or plain text",
             Setting::Mouse => "wheel and clicks; selecting text then needs Shift",
             Setting::Mic | Setting::Spk => "← → pick a device; “system default” follows the OS settings",
-            Setting::Denoise => "← → soft — turns noise down, the voice stays natural · normal — takes fans and clatter away · strong — also hiss, the voice gets thinner",
+            Setting::Denoise => "← → soft — turns noise down · normal — fans, hum · strong — also hiss · ai — a neural network like Krisp: keyboard, street, voices around (a tenth of a CPU core)",
             Setting::Agc => "a quiet voice is raised, a loud one is tamed",
             Setting::MicGain => "manual boost on top of the automatic level",
             Setting::Volume => "overall volume; per person — separately, F3",

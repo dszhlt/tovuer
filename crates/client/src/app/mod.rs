@@ -1232,6 +1232,7 @@ impl App {
             "soft" => (true, 0),
             "normal" | "on" => (true, 1),
             "strong" => (true, 2),
+            "ai" => (true, 3),
             _ => return false,
         };
         self.settings.denoise = on;

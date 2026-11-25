@@ -15,6 +15,7 @@ pub mod device;
 pub mod dsp;
 pub mod engine;
 pub mod mixer;
+pub mod neural;
 pub mod resample;
 pub mod sound;
 

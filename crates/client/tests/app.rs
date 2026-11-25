@@ -357,7 +357,7 @@ fn slash_commands_change_settings() {
     assert_eq!((h.app.denoise_mode(), h.last_toast().0), ("strong", Tone::Warn));
     h.say("/denoise soft");
     assert_eq!(h.app.engine.controls().denoise_strength(), tovuer_voice::Strength::Soft);
-    // in the settings window ← → walk off · soft · normal · strong
+    // in the settings window ← → walk off · soft · normal · strong · ai
     h.key(KeyCode::F(2));
     let row = tovuer::app::overlay::Setting::ALL.iter().position(|s| *s == tovuer::app::overlay::Setting::Denoise).unwrap();
     if let Some(Overlay::Settings(view)) = h.app.overlay.as_mut() {
@@ -370,9 +370,15 @@ fn slash_commands_change_settings() {
     assert_eq!(h.app.denoise_mode(), "off");
     assert!(!h.app.engine.controls().denoise.load(std::sync::atomic::Ordering::Relaxed));
     h.key(KeyCode::Left);
-    assert_eq!(h.app.denoise_mode(), "strong", "round the circle");
+    assert_eq!(h.app.denoise_mode(), "ai", "round the circle");
+    h.key(KeyCode::Left);
+    assert_eq!(h.app.denoise_mode(), "strong");
     h.key(KeyCode::Esc);
     assert_eq!(h.app.paths.load_settings().denoise_level, 2, "kept for next time");
+    h.say("/denoise ai");
+    assert_eq!(h.app.engine.controls().denoise_strength(), tovuer_voice::Strength::Neural);
+    assert_eq!(h.app.paths.load_settings().denoise_level, 3);
+    h.say("/denoise strong");
     h.say("/volume 150");
     assert_eq!(h.app.engine.controls().out_gain(), 1.5);
     h.say("/volume 900");

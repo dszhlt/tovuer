@@ -16,6 +16,11 @@ pub struct Controls {
     pub deafened: AtomicBool,
     pub denoise: AtomicBool,
     denoise_strength: AtomicU8,
+    /// Where the "ai" network is: 0 — never wanted, then [`crate::neural::State`].
+    neural: AtomicU8,
+    /// 10 ms pieces the network cleaned in time / missed (RNNoise took them).
+    pub neural_answered: AtomicU64,
+    pub neural_missed: AtomicU64,
     pub agc: AtomicBool,
     /// The gate is open — talking right now.
     pub speaking: AtomicBool,
@@ -40,6 +45,9 @@ impl Default for Controls {
             deafened: AtomicBool::new(false),
             denoise: AtomicBool::new(true),
             denoise_strength: AtomicU8::new(Strength::Normal as u8),
+            neural: AtomicU8::new(0),
+            neural_answered: AtomicU64::new(0),
+            neural_missed: AtomicU64::new(0),
             agc: AtomicBool::new(true),
             speaking: AtomicBool::new(false),
             sent: AtomicU64::new(0),
@@ -80,6 +88,15 @@ impl Controls {
 
     pub fn set_denoise_strength(&self, strength: Strength) {
         self.denoise_strength.store(strength as u8, Ordering::Relaxed);
+    }
+
+    /// Where the "ai" network is, once it was wanted.
+    pub fn neural_state(&self) -> Option<crate::neural::State> {
+        crate::neural::State::from_u8(self.neural.load(Ordering::Relaxed))
+    }
+
+    pub(crate) fn set_neural_state(&self, state: Option<crate::neural::State>) {
+        self.neural.store(state.map_or(0, |s| s as u8), Ordering::Relaxed);
     }
 
     /// Overall volume of others (a factor).

@@ -4,12 +4,22 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "tovuer voice engine: Opus, noise suppression, jitter buffer, mixer"
+description = "tovuer voice engine: Opus, noise suppression (RNNoise, DeepFilterNet3), jitter buffer, mixer"
 
 [dependencies]
 cpal = "0.18"
 nnnoiseless = { version = "0.5", default-features = false }
 unsafe-libopus = "0.2"
+# The "ai" noise suppression: DeepFilterNet3 (code and weights MIT/Apache-2.0)
+# from its official repository, at a reviewed commit; the model is built in.
+deep_filter = { git = "https://github.com/Rikorose/DeepFilterNet", rev = "7b14b895fe7fc42cab72b4a4c1e49c982bd6404b", default-features = false, features = ["tract", "default-model"] }
+ndarray = "0.15"
+# DeepFilterNet is written for tract 0.21.4 (ndarray 0.15); later 0.21.x
+# releases moved to ndarray 0.16 and no longer build with it
+tract-core = "=0.21.4"
+tract-onnx = "=0.21.4"
+tract-pulse = "=0.21.4"
+tract-hir = "=0.21.4"
 
 # On Linux talk to PulseAudio/PipeWire directly (pure Rust, no libpulse):
 # proper device names and shared access to audio. ALSA stays as a fallback.

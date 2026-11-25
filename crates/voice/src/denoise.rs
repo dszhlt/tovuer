@@ -5,11 +5,17 @@
 //! - **normal** is RNNoise as it is;
 //! - **strong** runs RNNoise twice and then lowers whatever stays near the
 //!   background's level — hiss RNNoise lets through, the rest between words
-//!   — the quietest background, at the price of a thinner voice.
+//!   — the quietest background, at the price of a thinner voice;
+//! - **ai** is a neural network, DeepFilterNet3 (see [`crate::neural`]):
+//!   keyboard clatter, the street and voices around go too, as with Krisp.
+//!
+//! RNNoise runs whatever the strength: its speech probability opens the
+//! microphone's gate.
 
 use nnnoiseless::DenoiseState;
 
 use crate::FRAME;
+use crate::neural::{self, Neural};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(u8)]
@@ -18,6 +24,7 @@ pub enum Strength {
     #[default]
     Normal = 1,
     Strong = 2,
+    Neural = 3,
 }
 
 impl Strength {
@@ -25,6 +32,7 @@ impl Strength {
         match v {
             0 => Strength::Soft,
             2 => Strength::Strong,
+            3 => Strength::Neural,
             _ => Strength::Normal,
         }
     }
@@ -34,6 +42,7 @@ impl Strength {
             Strength::Soft => "soft",
             Strength::Normal => "normal",
             Strength::Strong => "strong",
+            Strength::Neural => "ai",
         }
     }
 }
@@ -56,6 +65,7 @@ const FLOOR_WINDOW: usize = 128;
 const FLOOR_MIN: f32 = 1.0;
 
 const HALF: usize = DenoiseState::FRAME_SIZE;
+const _: () = assert!(HALF == neural::HOP, "RNNoise and the network both step 10 ms");
 
 pub struct Suppressor {
     first: Box<DenoiseState<'static>>,
@@ -68,6 +78,11 @@ pub struct Suppressor {
     /// The previous 10 ms of input: RNNoise gives its output that much
     /// later, and the soft mode mixes the original in line with it.
     late: [f32; HALF],
+    /// The neural network, started the first time it is wanted.
+    neural: Option<Neural>,
+    /// RNNoise's last outputs, oldest first: when the network has no answer,
+    /// the one as far behind as the network is stands in — no jump in time.
+    rn_past: [[f32; HALF]; neural::DELAY_HOPS - 1],
 }
 
 impl Default for Suppressor {
@@ -78,7 +93,37 @@ impl Default for Suppressor {
 
 impl Suppressor {
     pub fn new() -> Self {
-        Self { first: DenoiseState::new(), second: DenoiseState::new(), gain: 1.0, recent: std::collections::VecDeque::with_capacity(FLOOR_WINDOW), level: 0.0, late: [0.0; HALF] }
+        Self {
+            first: DenoiseState::new(),
+            second: DenoiseState::new(),
+            gain: 1.0,
+            recent: std::collections::VecDeque::with_capacity(FLOOR_WINDOW),
+            level: 0.0,
+            late: [0.0; HALF],
+            neural: None,
+            rn_past: [[0.0; HALF]; neural::DELAY_HOPS - 1],
+        }
+    }
+
+    /// Start loading the neural network now, before it is needed (it takes
+    /// about half a second, on a thread of its own).
+    pub fn warm_up(&mut self) {
+        self.neural.get_or_insert_with(Neural::start);
+    }
+
+    /// Where the neural network is, if it was ever wanted.
+    pub fn neural_state(&self) -> Option<neural::State> {
+        self.neural.as_ref().map(Neural::state)
+    }
+
+    /// Pieces the network cleaned in time, and those RNNoise took instead.
+    pub fn neural_counts(&self) -> (u64, u64) {
+        self.neural.as_ref().map_or((0, 0), |n| (n.answered, n.missed))
+    }
+
+    /// Why the neural network would not load.
+    pub fn neural_error(&self) -> Option<String> {
+        self.neural.as_ref().and_then(Neural::error)
     }
 
     /// Clean a 20 ms frame in place (when `on`). Returns RNNoise's speech
@@ -96,10 +141,25 @@ impl Suppressor {
             let p = self.first.process_frame(&mut cleaned, &scaled);
             vad = vad.max(p);
             let late = std::mem::replace(&mut self.late, scaled);
+            // RNNoise's output, kept a little for the network's stand-in
+            let mut rn_now = [0.0f32; HALF];
+            for (dst, c) in rn_now.iter_mut().zip(cleaned.iter()) {
+                *dst = c / 32768.0;
+            }
+            let rn_behind = self.rn_past[0];
+            self.rn_past.rotate_left(1);
+            self.rn_past[neural::DELAY_HOPS - 2] = rn_now;
             if !on {
                 continue;
             }
             match strength {
+                Strength::Neural => {
+                    // the original goes to the network; if it has no answer
+                    // in time (or is still loading), RNNoise's from as far
+                    // back stands in
+                    let piece: &[f32; HALF] = half;
+                    *half = self.neural.get_or_insert_with(Neural::start).process(piece).unwrap_or(rn_behind);
+                }
                 Strength::Soft => {
                     for ((s, c), o) in half.iter_mut().zip(cleaned.iter()).zip(late.iter()) {
                         *s = (c + SOFT_KEEP * (o - c)) / 32768.0;
@@ -234,5 +294,92 @@ mod tests {
         }
         assert!(s.process(&mut f, true, Strength::Strong) > 0.5, "speech is still recognized");
     }
-}
 
+    /// A suppressor with the neural network loaded (it loads on its own thread).
+    fn with_network() -> Suppressor {
+        let mut s = Suppressor::new();
+        s.warm_up();
+        let started = std::time::Instant::now();
+        while s.neural_state() == Some(neural::State::Loading) {
+            assert!(started.elapsed() < std::time::Duration::from_secs(60), "the model never loaded");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(s.neural_state(), Some(neural::State::Ready), "{:?}", s.neural_error());
+        s
+    }
+
+    /// The level left after `s` settles on `input`, in dB against the input.
+    fn left_db(s: &mut Suppressor, input: &[[f32; FRAME]], strength: Strength) -> f32 {
+        let (mut before, mut after) = (0.0f32, 0.0f32);
+        for (i, frame) in input.iter().enumerate() {
+            let mut f = *frame;
+            s.process(&mut f, true, strength);
+            if i >= input.len() / 2 {
+                before += rms(frame).powi(2);
+                after += rms(&f).powi(2);
+            }
+        }
+        10.0 * (after / before).log10()
+    }
+
+    #[test]
+    fn the_network_loads_aside_and_nothing_waits_for_it() {
+        let mut s = Suppressor::new();
+        let noise = hiss(5);
+        let started = std::time::Instant::now();
+        for frame in &noise {
+            let mut f = *frame;
+            s.process(&mut f, true, Strength::Neural);
+        }
+        // five frames while it loads: RNNoise stands in, at once
+        assert!(started.elapsed() < std::time::Duration::from_millis(200), "{:?}", started.elapsed());
+        assert!(s.neural_state().is_some(), "asking for it starts it");
+    }
+
+    #[test]
+    fn the_stand_in_is_as_late_as_the_network() {
+        // while the network loads, RNNoise stands in — two steps later than
+        // it would come by itself, as late as the network's own answers
+        let input = fan(5);
+        let (mut ai, mut plain) = (Suppressor::new(), Suppressor::new());
+        let (mut a, mut p) = (Vec::new(), Vec::new());
+        for frame in &input {
+            let (mut x, mut y) = (*frame, *frame);
+            ai.process(&mut x, true, Strength::Neural);
+            plain.process(&mut y, true, Strength::Normal);
+            a.extend_from_slice(&x);
+            p.extend_from_slice(&y);
+        }
+        assert_eq!(ai.neural_state(), Some(neural::State::Loading), "still loading: these were stand-ins");
+        let shift = (neural::DELAY_HOPS - 1) * HALF;
+        assert!(a[..shift].iter().all(|v| *v == 0.0));
+        assert_eq!(&a[shift..], &p[..p.len() - shift]);
+    }
+
+    #[test]
+    fn the_network_takes_hiss_and_clatter_rnnoise_leaves() {
+        let mut s = with_network();
+        let hiss_left = left_db(&mut s, &hiss(150), Strength::Neural);
+        let rnnoise_left = left_db(&mut Suppressor::new(), &hiss(150), Strength::Normal);
+        assert!(hiss_left < rnnoise_left - 10.0, "hiss: the network leaves {hiss_left:.1} dB, RNNoise {rnnoise_left:.1} dB");
+
+        // keyboard: sharp clicks every 150 ms
+        let clicks: Vec<f32> = random(150 * FRAME)
+            .into_iter()
+            .enumerate()
+            .map(|(i, w)| {
+                let p = i % 7200;
+                if p < 240 { w * 1.6 * (1.0 - p as f32 / 240.0) } else { 0.0 }
+            })
+            .collect();
+        let mut s = with_network();
+        let clicks_left = left_db(&mut s, &frames(&clicks), Strength::Neural);
+        assert!(clicks_left < -15.0, "clicks: {clicks_left:.1} dB left");
+    }
+
+    // That the network keeps a voice was measured on real speech —
+    // DeepFilterNet's own recordings, alone and under 0 dB of street noise:
+    // the level stays within 1 dB, SI-SDR 10–20 dB. Those recordings may not
+    // be shipped here (CC BY-NC), and a synthetic voice is no test: the
+    // network rightly takes it for noise.
+}

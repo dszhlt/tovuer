@@ -24,11 +24,16 @@ and Windows.
 
 **Voice**
 - Opus 48 kHz, about 4 KB/s per speaker.
-- RNNoise noise suppression: fans, room noise and keyboard clatter do not get
-  through; the microphone opens on speech, not on loudness. Three strengths
-  (`F2` or `/denoise soft|normal|strong`): soft only turns the noise down
-  and keeps the voice natural, strong also takes away the hiss of a cheap
-  microphone.
+- RNNoise noise suppression: fans and room noise do not get through; the
+  microphone opens on speech, not on loudness. Strengths (`F2` or
+  `/denoise soft|normal|strong|ai`): soft only turns the noise down and keeps
+  the voice natural, strong also takes away the hiss of a cheap microphone.
+- **ai** — a neural network, like Krisp:
+  [DeepFilterNet3](https://github.com/Rikorose/DeepFilterNet) (MIT/Apache-2.0)
+  built into the program. Keyboard clatter, the street and voices around go
+  too: on recordings of speech under such noise it is 3–10 dB cleaner than
+  RNNoise. It costs about a tenth of a CPU core and 30 ms of delay; `/mic`
+  shows how it keeps up.
 - Automatic microphone level, per-person volume, local mute.
 - An adaptive buffer: 40–60 ms on a good link, growing up to half a second
   over a poor relay and shrinking back; lost packets are concealed.
@@ -247,7 +252,7 @@ channel…", "Delete channel #…".
 | `/m`, `/d` | your microphone; sound as a whole |
 | `/mute <nick>`, `/unmute <nick>`, `/vol <nick> <0-200>` | mute / unmute / someone's volume — only for you |
 | `/volume <0-200>`, `/gain <50-300>` | overall volume; microphone gain |
-| `/denoise [off\|soft\|normal\|strong]`, `/agc` | noise suppression and its strength, automatic level |
+| `/denoise [off\|soft\|normal\|strong\|ai]`, `/agc` | noise suppression and its strength (`ai` — the neural network), automatic level |
 | `/devices`, `/mic [name]`, `/spk [name]` | devices; `/mic` without a name — audio diagnostics |
 | `/call`, `/cam [on\|off]`, `/screen [on\|off]` | the call; your camera; share your screen |
 | `/webcam [name\|default\|test]` | pick a camera (`test` — a test picture) |
@@ -281,7 +286,7 @@ nick), `TOVUER_VERSION`.
 
 ```
 crates/proto    shared types: chat messages, channels, users, the voice and video frames
-crates/voice    audio: Opus, RNNoise, automatic gain, jitter buffer, devices (cpal)
+crates/voice    audio: Opus, RNNoise and DeepFilterNet3 noise suppression, automatic gain, jitter buffer, devices (cpal)
 crates/node     the peer: room keys, signed operation log, DHT lookup, iroh connections
 crates/client   the client: logic, interface (ratatui), cameras and screens, the link to its own node
 ```

@@ -49,11 +49,16 @@ pub struct CaptureProcessor {
 
 impl CaptureProcessor {
     pub fn new(ctl: Arc<Controls>) -> Result<Self, CodecError> {
+        let mut denoise = Suppressor::new();
+        // the network takes half a second to load: start now if it is the choice
+        if ctl.denoise_strength() == crate::denoise::Strength::Neural {
+            denoise.warm_up();
+        }
         Ok(Self {
             ctl,
             pending: Vec::with_capacity(FRAME * 4),
             high_pass: Biquad::high_pass(SAMPLE_RATE as f32, 90.0, 0.707),
-            denoise: Suppressor::new(),
+            denoise,
             agc: Agc::new(),
             encoder: Encoder::new(DEFAULT_BITRATE)?,
             seq: 0,
@@ -85,6 +90,10 @@ impl CaptureProcessor {
         // (keyboard clatter does not pass), whether suppression is on or not
         let denoise_on = self.ctl.denoise.load(Ordering::Relaxed);
         let vad = self.denoise.process(frame, denoise_on, self.ctl.denoise_strength());
+        self.ctl.set_neural_state(self.denoise.neural_state());
+        let (answered, missed) = self.denoise.neural_counts();
+        self.ctl.neural_answered.store(answered, Ordering::Relaxed);
+        self.ctl.neural_missed.store(missed, Ordering::Relaxed);
 
         let raw_level = rms(frame);
         let voiced = vad >= self.ctl.vad_threshold() && raw_level > SILENCE_FLOOR;

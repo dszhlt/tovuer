@@ -262,7 +262,7 @@ impl App {
                         "theme" => Theme::names().iter().map(|n| n.to_string()).collect(),
                         "v" | "voice" => self.channels.iter().filter(|c| !c.is_text()).map(|c| c.name.clone()).collect(),
                         "mute" | "unmute" | "vol" | "kick" => self.others().iter().map(|u| u.name.clone()).collect(),
-                        "denoise" => ["off", "soft", "normal", "strong"].iter().map(|s| s.to_string()).collect(),
+                        "denoise" => ["off", "soft", "normal", "strong", "ai"].iter().map(|s| s.to_string()).collect(),
                         "agc" | "mouse" | "transparent" | "previews" | "animate" | "sharp" => vec!["on".into(), "off".into()],
                         "watch" => std::iter::once("off".to_string()).chain(self.live().iter().map(|u| u.name.clone())).collect(),
                         "color" => std::iter::once("off").chain(super::style::COLORS.iter().map(|c| c.0)).map(str::to_string).collect(),
@@ -854,7 +854,14 @@ impl App {
             Setting::Mouse => on(s.mouse),
             Setting::Mic => device(&s.mic),
             Setting::Spk => device(&s.spk),
-            Setting::Denoise => self.denoise_mode().to_string(),
+            Setting::Denoise => {
+                use tovuer_voice::neural::State;
+                match (self.denoise_mode(), self.engine.controls().neural_state()) {
+                    ("ai", Some(State::Loading)) if self.engine.running() => "ai · loading…".into(),
+                    ("ai", Some(State::Failed)) => "ai · unavailable, RNNoise works".into(),
+                    (mode, _) => mode.to_string(),
+                }
+            }
             Setting::Agc => on(s.agc),
             Setting::MicGain => format!("{}%", s.mic_gain),
             Setting::Volume => format!("{}%", s.volume),
@@ -919,9 +926,9 @@ impl App {
                 self.restart_engine();
             }
             Setting::Denoise => {
-                const MODES: [&str; 4] = ["off", "soft", "normal", "strong"];
+                const MODES: [&str; 5] = ["off", "soft", "normal", "strong", "ai"];
                 let at = MODES.iter().position(|m| *m == self.denoise_mode()).unwrap_or(2);
-                self.set_denoise_mode(MODES[(at as isize + delta).rem_euclid(4) as usize]);
+                self.set_denoise_mode(MODES[(at as isize + delta).rem_euclid(MODES.len() as isize) as usize]);
             }
             Setting::Agc => self.settings.agc = !self.settings.agc,
             Setting::MicGain => self.settings.mic_gain = step(self.settings.mic_gain, 50, 300),
