@@ -1,0 +1,52 @@
+name: release
+# A tag like v2.1.0 publishes a release with a build for each system;
+# tovuer's /update takes it from here. The release stays a draft until
+# every build is attached, so /update never sees a half-made one.
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  draft:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --title "tovuer ${GITHUB_REF_NAME#v}" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+  build:
+    needs: draft
+    strategy:
+      matrix:
+        include:
+          # an older Ubuntu: the build then runs on older systems too
+          - os: ubuntu-22.04
+            asset: tovuer-linux-amd64
+            built: target/release/tovuer
+          - os: windows-latest
+            asset: tovuer-windows-amd64.exe
+            built: target/release/tovuer.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - name: build
+        shell: bash
+        run: |
+          export TOVUER_VERSION="${GITHUB_REF_NAME#v}"
+          cargo build --release -p tovuer
+          cp "${{ matrix.built }}" "${{ matrix.asset }}"
+      - name: attach to the release
+        shell: bash
+        run: gh release upload "$GITHUB_REF_NAME" "${{ matrix.asset }}" --repo "$GITHUB_REPOSITORY" --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+        env:
+          GH_TOKEN: ${{ github.token }}

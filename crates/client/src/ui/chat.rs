@@ -52,12 +52,12 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) -> Option<(u16, u16)> {
     // header
     let (name, topic) = app.channel().map(|c| (c.name.clone(), c.topic.clone())).unwrap_or_default();
     let title = Style::new().fg(t.text).bg(t.bg).add_modifier(Modifier::BOLD);
-    let mut x = put(buf, area.x + 2, area.y, "# ", Style::new().fg(t.faint).bg(t.bg), 2);
-    x = put(buf, x, area.y, &clip(&name, area.width as usize - 6), title, area.width - 4);
-    if !topic.is_empty() && x + 6 < area.right() {
-        x = put(buf, x + 2, area.y, "│ ", Style::new().fg(t.line).bg(t.bg), 2);
-        let room = area.right().saturating_sub(x + 2) as usize;
-        put(buf, x, area.y, &clip(&topic, room), Style::new().fg(t.dim).bg(t.bg), room as u16);
+    if app.call_open() {
+        call_header(buf, area, app, &name);
+    } else {
+        let x = put(buf, area.x + 2, area.y, "# ", Style::new().fg(t.faint).bg(t.bg), 2);
+        let x = put(buf, x, area.y, &clip(&name, area.width as usize - 6), title, area.width - 4);
+        header_topic(buf, area, x, &topic, &t);
     }
     hrule(buf, area.x, area.y + 1, area.width, Style::new().fg(t.line).bg(t.bg));
 
@@ -72,7 +72,13 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) -> Option<(u16, u16)> {
     let typing_y = compose_y - 1;
     let msgs = Rect::new(area.x, area.y + 2, area.width, typing_y.saturating_sub(area.y + 2));
 
-    messages(buf, msgs, app);
+    if app.call_open() {
+        super::call::draw(buf, msgs, app);
+    } else {
+        // someone's screen, watched above the feed, or who is live
+        let msgs = super::call::stream(buf, msgs, app);
+        messages(buf, msgs, app);
+    }
     typing_line(buf, Rect::new(area.x, typing_y, area.width, 1), app);
     if let Some(compose) = &app.compose {
         compose_bar(buf, Rect::new(area.x + 1, compose_y, area.width - 2, 1), compose, &t, app.icons);
@@ -115,6 +121,28 @@ pub fn draw(buf: &mut Buffer, area: Rect, app: &mut App) -> Option<(u16, u16)> {
     }
 
     focused.then(|| (text_x + layout.cursor.0, input_area.y + 1 + (layout.cursor.1 as usize - first) as u16))
+}
+
+fn header_topic(buf: &mut Buffer, area: Rect, x: u16, topic: &str, t: &Theme) {
+    if !topic.is_empty() && x + 6 < area.right() {
+        let x = put(buf, x + 2, area.y, "│ ", Style::new().fg(t.line).bg(t.bg), 2);
+        let room = area.right().saturating_sub(x + 2) as usize;
+        put(buf, x, area.y, &clip(topic, room), Style::new().fg(t.dim).bg(t.bg), room as u16);
+    }
+}
+
+/// The call's header: the voice channel, how many are in it, the way back.
+fn call_header(buf: &mut Buffer, area: Rect, app: &App, text_channel: &str) {
+    let t = &app.theme;
+    let channel = app.voice.as_ref().map(|v| v.channel.clone()).unwrap_or_default();
+    let back = format!("Alt+C — back to #{text_channel}");
+    let right = put_right(buf, area.right() - 2, area.y, &back, Style::new().fg(t.faint).bg(t.bg), area.x + area.width / 2);
+    put(buf, area.x + 2, area.y, app.icons.get(Icon::Voice), Style::new().fg(t.ok).bg(t.bg), 2);
+    let x = area.x + 5;
+    let room = right.saturating_sub(x + 1);
+    let x = put(buf, x, area.y, &clip(&channel, room as usize), Style::new().fg(t.ok).bg(t.bg).add_modifier(Modifier::BOLD), room);
+    let tail = format!(" · {} in the call", app.call_members().len());
+    put(buf, x, area.y, &tail, Style::new().fg(t.faint).bg(t.bg), right.saturating_sub(x + 1));
 }
 
 fn typing_line(buf: &mut Buffer, area: Rect, app: &App) {
@@ -471,6 +499,8 @@ fn messages(buf: &mut Buffer, area: Rect, app: &mut App) {
     let mut animating = false;
     let sharp = app.sharp_pictures();
     let mut spots = Vec::new();
+    // where moving previews are; `None` — they stand still
+    let anim_now = app.animating_previews().then(|| app.ui.anim_ms());
     for (i, start) in starts.iter().enumerate().skip(first) {
         if *start >= top + rows {
             break;
@@ -522,6 +552,29 @@ fn messages(buf: &mut Buffer, area: Rect, app: &mut App) {
             }
             row += 1;
         }
+        // a moving thumbnail: its current frame over the still one
+        if let (Some((lines, cols)), Some(file), Some(now)) = (&laid.thumb, &msg.file, anim_now)
+            && let Some(ThumbState::Ready(thumb)) = app.thumbs.get(&file.id)
+            && thumb.anim.is_some()
+            && thumb.w == *cols
+        {
+            let px = thumb.frame_at(now);
+            let first = start + pre.len() + lines.start;
+            for r in 0..lines.len().min(thumb.rows() as usize) {
+                let row = first + r;
+                if row < top || row >= top + rows {
+                    continue;
+                }
+                let y = area.y + pad + (row - top) as u16;
+                for x in 0..thumb.w {
+                    let (hi, lo) = (px[2 * r * thumb.w as usize + x as usize], px[(2 * r + 1) * thumb.w as usize + x as usize]);
+                    if let Some(cell) = buf.cell_mut((area.x + 2 + x, y)) {
+                        cell.set_symbol("▀").set_fg(Color::Rgb(hi[0], hi[1], hi[2])).set_bg(Color::Rgb(lo[0], lo[1], lo[2]));
+                    }
+                }
+            }
+            animating = true;
+        }
         // a thumbnail wholly in view may get real pixels at the end of the frame
         if sharp
             && let (Some((lines, cols)), Some(file)) = (&laid.thumb, &msg.file)
@@ -562,7 +615,7 @@ mod tests {
 
     #[test]
     fn thumbnails_use_half_blocks() {
-        let thumb = Thumb { w: 2, h: 4, px: vec![[1, 1, 1], [2, 2, 2], [3, 3, 3], [4, 4, 4], [5, 5, 5], [6, 6, 6], [7, 7, 7], [8, 8, 8]], duration: None };
+        let thumb = Thumb { w: 2, h: 4, px: vec![[1, 1, 1], [2, 2, 2], [3, 3, 3], [4, 4, 4], [5, 5, 5], [6, 6, 6], [7, 7, 7], [8, 8, 8]], duration: None, anim: None };
         let lines = thumb_lines(&thumb);
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].spans.len(), 2);

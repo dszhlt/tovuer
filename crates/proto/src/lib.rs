@@ -2,11 +2,12 @@
 //!
 //! [`ClientMsg`] is what the interface asks its local node to do;
 //! [`ServerMsg`] is what the node tells the interface. Both are tagged JSON
-//! (`{"t":"send","channel":"general","text":"hi"}`). The voice frame format
-//! is in [`voice`]. How peers talk to each other lives in `tovuer-node`.
+//! (`{"t":"send","channel":"general","text":"hi"}`). The voice and video
+//! frame formats are in [`voice`] and [`video`]. How peers talk to each other lives in `tovuer-node`.
 
 use serde::{Deserialize, Serialize};
 
+pub mod video;
 pub mod voice;
 
 /// Protocol version. Peers with different versions do not talk to each other.
@@ -28,6 +29,14 @@ pub const REPLY_PREVIEW_CHARS: usize = 120;
 pub enum ChannelKind {
     Text,
     Voice,
+}
+
+/// What someone shows in a voice channel.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoSource {
+    Camera,
+    Screen,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -62,6 +71,9 @@ pub struct User {
     pub deafened: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub admin: bool,
+    /// Their camera or screen is on (in their voice channel).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video: Option<VideoSource>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -225,6 +237,18 @@ pub enum ClientMsg {
     Speaking {
         on: bool,
     },
+    /// What we show in our voice channel, whether we watch its call, and
+    /// whose screen we watch from a text channel (anyone in the room can
+    /// watch a screen being shared). Only those who watch get video.
+    Video {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<VideoSource>,
+        #[serde(default)]
+        watching: bool,
+        /// The nick of the person whose screen we watch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stream: Option<String>,
+    },
     ChannelCreate {
         name: String,
         kind: ChannelKind,
@@ -260,9 +284,6 @@ pub enum ServerMsg {
         channels: Vec<Channel>,
         users: Vec<User>,
         max_file: u64,
-        /// Client release the room owner hands out (for the "update" hint).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        client_version: Option<String>,
         /// A note to show on entry.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         motd: Option<String>,

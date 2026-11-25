@@ -30,37 +30,42 @@ impl Drop for TempDir {
 }
 
 type Heard = Arc<Mutex<Vec<(u32, u16, Vec<u8>)>>>;
+type Seen = Arc<Mutex<Vec<(u32, Vec<u8>)>>>;
 
 struct Peer {
     node: Node,
     events: mpsc::UnboundedReceiver<Event>,
     heard: Heard,
+    seen: Seen,
     me: User,
     users: Vec<User>,
     admin: bool,
     motd: Option<String>,
-    client_version: Option<String>,
 }
 
 struct Opts<'a> {
     room: &'a str,
     password: &'a str,
     seed: u8,
-    release: Option<PathBuf>,
 }
 
 impl<'a> Opts<'a> {
     fn new(seed: u8) -> Self {
-        Self { room: "home", password: "", seed, release: None }
+        Self { room: "home", password: "", seed }
     }
 }
 
-async fn start(dir: &TempDir, net: &LocalNet, nick: &str, opts: Opts<'_>) -> (Node, mpsc::UnboundedReceiver<Event>, Heard) {
+async fn start(dir: &TempDir, net: &LocalNet, nick: &str, opts: Opts<'_>) -> (Node, mpsc::UnboundedReceiver<Event>, Heard, Seen) {
     let (tx, rx) = mpsc::unbounded_channel();
     let heard: Heard = Arc::default();
+    let seen: Seen = Arc::default();
     let sink = {
         let heard = heard.clone();
         Arc::new(move |id: u32, seq: u16, _end: bool, data: &[u8]| heard.lock().unwrap().push((id, seq, data.to_vec())))
+    };
+    let video_sink = {
+        let seen = seen.clone();
+        Arc::new(move |id: u32, frame: bytes::Bytes| seen.lock().unwrap().push((id, frame.to_vec())))
     };
     let home = dir.0.join(format!("peer-{}", opts.seed));
     let cfg = Config {
@@ -71,21 +76,20 @@ async fn start(dir: &TempDir, net: &LocalNet, nick: &str, opts: Opts<'_>) -> (No
         secret: SecretKey::from_bytes(&[opts.seed; 32]),
         data_dir: home.join("rooms"),
         files_dir: home.join("files"),
-        release_dir: opts.release,
         network: Network::Local(net.clone()),
     };
-    let node = Node::start(cfg, tx, sink).await.unwrap();
-    (node, rx, heard)
+    let node = Node::start(cfg, tx, sink, video_sink).await.unwrap();
+    (node, rx, heard, seen)
 }
 
 async fn join(dir: &TempDir, net: &LocalNet, nick: &str, opts: Opts<'_>) -> Peer {
-    let (node, mut events, heard) = start(dir, net, nick, opts).await;
+    let (node, mut events, heard, seen) = start(dir, net, nick, opts).await;
     let welcome = next(&mut events, |e| matches!(e, Event::Msg(m) if matches!(**m, ServerMsg::Welcome { .. })) || matches!(e, Event::Rejected { .. })).await;
     let Event::Msg(msg) = welcome else { panic!("{nick} was not let in: {welcome:?}") };
-    let ServerMsg::Welcome { id, name, users, admin, motd, client_version, .. } = *msg else { unreachable!() };
+    let ServerMsg::Welcome { id, name, users, admin, motd, .. } = *msg else { unreachable!() };
     let me = users.iter().find(|u| u.id == id).cloned().unwrap();
     assert_eq!(name, nick);
-    Peer { node, events, heard, me, users, admin, motd, client_version }
+    Peer { node, events, heard, seen, me, users, admin, motd }
 }
 
 async fn next(events: &mut mpsc::UnboundedReceiver<Event>, want: impl Fn(&Event) -> bool) -> Event {
@@ -238,7 +242,7 @@ async fn nick_taken_and_kick() {
     let mut bob = join(&dir, &net, "bob", Opts::new(2)).await;
     dana.joined("bob").await;
 
-    let (_node, mut events, _) = start(&dir, &net, "Bob", Opts::new(3)).await;
+    let (_node, mut events, _, _) = start(&dir, &net, "Bob", Opts::new(3)).await;
     match next(&mut events, |e| matches!(e, Event::Rejected { .. })).await {
         Event::Rejected { code, .. } => assert_eq!(code, ErrorCode::NameTaken),
         _ => unreachable!(),
@@ -255,7 +259,7 @@ async fn nick_taken_and_kick() {
     dana.server(|m| matches!(m, ServerMsg::UserLeave { .. })).await;
 
     // bob cannot come back with the same identity
-    let (_node, mut events, _) = start(&dir, &net, "bob", Opts::new(2)).await;
+    let (_node, mut events, _, _) = start(&dir, &net, "bob", Opts::new(2)).await;
     match next(&mut events, |e| matches!(e, Event::Rejected { .. })).await {
         Event::Rejected { code, .. } => assert_eq!(code, ErrorCode::Kicked),
         _ => unreachable!(),
@@ -299,6 +303,106 @@ async fn voice_goes_straight_to_the_same_channel() {
     dana.node.send(ClientMsg::Speaking { on: true });
     assert!(matches!(bob.server(|m| matches!(m, ServerMsg::Speaking { .. })).await, ServerMsg::Speaking { id, on: true } if id == dana_on_bob));
     let _ = dana.me;
+}
+
+#[tokio::test]
+async fn video_goes_to_those_watching_the_same_channel() {
+    use tovuer_proto::VideoSource;
+    let (dir, net) = (TempDir::new("video"), LocalNet::new());
+    let mut dana = join(&dir, &net, "dana", Opts::new(1)).await;
+    let mut bob = join(&dir, &net, "bob", Opts::new(2)).await;
+    let mut kate = join(&dir, &net, "kate", Opts::new(3)).await;
+    let mut yana = join(&dir, &net, "yana", Opts::new(4)).await;
+    dana.joined("yana").await;
+
+    for peer in [&dana, &bob, &kate] {
+        peer.node.send(ClientMsg::VoiceJoin { channel: "Lounge".into() });
+    }
+    yana.node.send(ClientMsg::VoiceJoin { channel: "Gaming".into() });
+    dana.node.send(ClientMsg::Video { source: Some(VideoSource::Camera), watching: false, stream: None });
+    // bob and yana look at their calls, kate only listens
+    bob.node.send(ClientMsg::Video { source: None, watching: true, stream: None });
+    yana.node.send(ClientMsg::Video { source: None, watching: true, stream: None });
+    for peer in [&mut bob, &mut kate, &mut yana] {
+        peer.server(|m| matches!(m, ServerMsg::UserUpdate { user } if user.name == "dana" && user.video == Some(VideoSource::Camera))).await;
+    }
+    dana.server(|m| matches!(m, ServerMsg::UserUpdate { user } if user.name == "bob" && user.voice.as_deref() == Some("Lounge"))).await;
+    dana.server(|m| matches!(m, ServerMsg::UserUpdate { user } if user.name == "yana" && user.voice.is_some())).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let jpeg = [0xff, 0xd8, 7, 7, 7, 0xff, 0xd9];
+    let frame = tovuer_proto::video::encode(VideoSource::Camera, 1, 320, 240, &jpeg);
+    timeout(WAIT, async {
+        loop {
+            dana.node.video(bytes::Bytes::from(frame.clone()));
+            if !bob.seen.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("bob never saw dana");
+    let dana_on_bob = bob.users.iter().find(|u| u.name == "dana").unwrap().id;
+    assert_eq!(bob.seen.lock().unwrap()[0], (dana_on_bob, frame.clone()));
+    // garbage is not passed on
+    dana.node.video(bytes::Bytes::from_static(b"not a frame"));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(bob.seen.lock().unwrap().iter().all(|(_, f)| *f == frame));
+    assert!(kate.seen.lock().unwrap().is_empty(), "not watching: no video");
+    assert!(yana.seen.lock().unwrap().is_empty(), "another channel: no video");
+
+    // leaving voice turns the camera off for everyone
+    dana.node.send(ClientMsg::VoiceLeave);
+    bob.server(|m| matches!(m, ServerMsg::UserUpdate { user } if user.name == "dana" && user.voice.is_none() && user.video.is_none())).await;
+}
+
+#[tokio::test]
+async fn a_shared_screen_can_be_watched_from_a_text_channel() {
+    use tovuer_proto::VideoSource;
+    let (dir, net) = (TempDir::new("stream"), LocalNet::new());
+    let mut kate = join(&dir, &net, "kate", Opts::new(1)).await;
+    let mut oleg = join(&dir, &net, "oleg", Opts::new(2)).await;
+    let mut bob = join(&dir, &net, "bob", Opts::new(3)).await;
+    kate.joined("bob").await;
+
+    kate.node.send(ClientMsg::VoiceJoin { channel: "Lounge".into() });
+    kate.node.send(ClientMsg::Video { source: Some(VideoSource::Screen), watching: false, stream: None });
+    // oleg is in no voice channel: he watches kate's screen from the chat (any case of her nick)
+    oleg.node.send(ClientMsg::Video { source: None, watching: false, stream: Some("KATE".into()) });
+    for peer in [&mut oleg, &mut bob] {
+        peer.server(|m| matches!(m, ServerMsg::UserUpdate { user } if user.name == "kate" && user.video == Some(VideoSource::Screen))).await;
+    }
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let jpeg = [0xff, 0xd8, 1, 2, 3, 0xff, 0xd9];
+    let screen = tovuer_proto::video::encode(VideoSource::Screen, 1, 1280, 720, &jpeg);
+    timeout(WAIT, async {
+        loop {
+            kate.node.video(bytes::Bytes::from(screen.clone()));
+            if !oleg.seen.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("oleg never saw kate's screen");
+    assert_eq!(oleg.seen.lock().unwrap()[0].1, screen);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(bob.seen.lock().unwrap().is_empty(), "not watching: nothing");
+
+    // a camera is for the call only, even to someone watching her screen
+    kate.node.send(ClientMsg::Video { source: Some(VideoSource::Camera), watching: false, stream: None });
+    oleg.server(|m| matches!(m, ServerMsg::UserUpdate { user } if user.name == "kate" && user.video == Some(VideoSource::Camera))).await;
+    let before = oleg.seen.lock().unwrap().len();
+    let camera = tovuer_proto::video::encode(VideoSource::Camera, 2, 640, 480, &jpeg);
+    for _ in 0..10 {
+        kate.node.video(bytes::Bytes::from(camera.clone()));
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(oleg.seen.lock().unwrap().len(), before);
 }
 
 #[tokio::test]
@@ -364,22 +468,4 @@ async fn channels_and_owner_powers() {
     let oops = dana.message("oops").await;
     dana.node.send(ClientMsg::Delete { id: oops.id });
     assert!(matches!(bob.server(|m| matches!(m, ServerMsg::MsgDelete { .. })).await, ServerMsg::MsgDelete { id, .. } if id == oops.id));
-}
-
-#[tokio::test]
-async fn update_comes_from_the_owner() {
-    let (dir, net) = (TempDir::new("update"), LocalNet::new());
-    let release = dir.0.join("release");
-    std::fs::create_dir_all(&release).unwrap();
-    std::fs::write(release.join("VERSION"), "2026-11-22\n").unwrap();
-    std::fs::write(release.join("tovuer-linux-amd64"), b"\x7fELF new build").unwrap();
-    let _dana = join(&dir, &net, "dana", Opts { release: Some(release), ..Opts::new(1) }).await;
-    let bob = join(&dir, &net, "bob", Opts::new(2)).await;
-    assert_eq!(bob.client_version.as_deref(), Some("2026-11-22"));
-
-    let (version, data) = bob.node.fetch_update("tovuer-linux-amd64", "old", |_, _| {}).await.unwrap().unwrap();
-    assert_eq!((version.as_str(), data.as_slice()), ("2026-11-22", &b"\x7fELF new build"[..]));
-    assert_eq!(bob.node.fetch_update("tovuer-linux-amd64", "2026-11-22", |_, _| {}).await, Ok(None));
-    assert!(bob.node.fetch_update("tovuer-windows-amd64.exe", "old", |_, _| {}).await.is_err());
-    assert!(bob.node.fetch_update("../../etc/passwd", "old", |_, _| {}).await.is_err());
 }

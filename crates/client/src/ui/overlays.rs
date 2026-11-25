@@ -131,7 +131,7 @@ pub fn login(buf: &mut Buffer, area: Rect, app: &App) -> Option<(u16, u16)> {
         y += 1;
     }
     let hint = if form.offer_update {
-        "F5 — update the client · Enter — join · Esc — quit"
+        "F5 — update tovuer from GitHub · Enter — join · Esc — quit"
     } else if app.launch.friend && !form.ask_password {
         "Enter — join · Esc — quit"
     } else {
@@ -296,6 +296,14 @@ fn help_lines(t: &Theme, w: usize) -> Vec<Line<'static>> {
         row("Alt+M", "microphone (also m in the channel list)"),
         row("Alt+D", "sound: hear no one and stay silent"),
         Line::default(),
+        head("VIDEO  (in a voice channel)"),
+        row("Alt+C", "the call: everyone's camera and screen instead of the feed"),
+        row("Alt+V · Alt+S", "your camera · share your screen (one at a time)"),
+        row("Alt+W", "watch a screen someone shares, above the chat — from any channel; again — the next one or stop"),
+        row("Alt+F", "the watched screen over the whole window (or click it); Esc — back"),
+        row("Shift+Tab, ← →", "pick a tile in the call · Enter — make it big"),
+        row("click a tile", "make it big · click again — everyone"),
+        Line::default(),
         head("MESSAGES  (Shift+Tab from the input)"),
         row("↑ ↓", "pick a message"),
         row("r · e · d", "reply · edit · delete"),
@@ -437,7 +445,7 @@ fn settings(buf: &mut Buffer, area: Rect, app: &mut App, view: &mut SettingsView
         if selected {
             label = label.add_modifier(Modifier::BOLD);
         }
-        let loading = matches!(which, Setting::Mic | Setting::Spk) && view.mics.is_none();
+        let loading = (matches!(which, Setting::Mic | Setting::Spk) && view.mics.is_none()) || (which == Setting::Camera && view.cameras.is_none());
         let value = app.setting_value(which);
         let value_color = match value.as_str() {
             "on" => t.ok,

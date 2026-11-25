@@ -1,7 +1,9 @@
 //! The engine's shared knobs: the interface turns them, the audio threads read
 //! them. All atomics — the audio callback never waits on a lock for a setting.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+
+use crate::denoise::Strength;
 
 /// Default speech detector threshold (RNNoise probability, 0..1).
 pub const DEFAULT_VAD_THRESHOLD: f32 = 0.55;
@@ -13,6 +15,7 @@ pub struct Controls {
     /// Sound is off: we hear no one and the microphone is silent too.
     pub deafened: AtomicBool,
     pub denoise: AtomicBool,
+    denoise_strength: AtomicU8,
     pub agc: AtomicBool,
     /// The gate is open — talking right now.
     pub speaking: AtomicBool,
@@ -36,6 +39,7 @@ impl Default for Controls {
             muted: AtomicBool::new(false),
             deafened: AtomicBool::new(false),
             denoise: AtomicBool::new(true),
+            denoise_strength: AtomicU8::new(Strength::Normal as u8),
             agc: AtomicBool::new(true),
             speaking: AtomicBool::new(false),
             sent: AtomicU64::new(0),
@@ -67,6 +71,15 @@ impl Controls {
 
     pub fn set_mic_gain(&self, gain: f32) {
         store(&self.mic_gain, gain.clamp(0.0, 4.0));
+    }
+
+    /// How hard noise suppression works.
+    pub fn denoise_strength(&self) -> Strength {
+        Strength::from_u8(self.denoise_strength.load(Ordering::Relaxed))
+    }
+
+    pub fn set_denoise_strength(&self, strength: Strength) {
+        self.denoise_strength.store(strength as u8, Ordering::Relaxed);
     }
 
     /// Overall volume of others (a factor).

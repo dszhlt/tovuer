@@ -10,6 +10,7 @@
 pub mod capture;
 pub mod codec;
 pub mod controls;
+pub mod denoise;
 pub mod device;
 pub mod dsp;
 pub mod engine;
@@ -24,6 +25,7 @@ pub const FRAME: usize = 960;
 
 pub use capture::Packet;
 pub use controls::{Controls, DEFAULT_VAD_THRESHOLD};
+pub use denoise::Strength;
 pub use device::{AudioError, DeviceInfo, StreamInfo, list_devices};
 pub use engine::Engine;
 pub use mixer::PeerStats;

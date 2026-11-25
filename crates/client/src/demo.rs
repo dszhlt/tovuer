@@ -31,7 +31,7 @@ fn server(app: &mut App, msg: ServerMsg) {
 }
 
 fn user(id: u32, name: &str, voice: Option<&str>) -> User {
-    User { id, name: name.into(), voice: voice.map(str::to_string), muted: false, deafened: false, admin: id == 1 }
+    User { id, name: name.into(), voice: voice.map(str::to_string), muted: false, deafened: false, admin: id == 1, video: None }
 }
 
 /// This afternoon minus `minutes_ago` — so date and time labels stay stable.
@@ -112,7 +112,6 @@ pub fn populate(app: &mut App) {
             ],
             users: vec![user(1, "dana", None), user(2, "bob", Some("Lounge")), user(3, "kate", Some("Lounge")), user(4, "oleg", None)],
             max_file: 50 << 20,
-            client_version: None,
             motd: None,
         },
     );
@@ -178,6 +177,84 @@ pub fn in_voice(app: &mut App, channel: &str) {
     });
 }
 
+/// A stand-in for a shared screen: an editor with a few big lines of code,
+/// readable even as blocks.
+pub fn screen_picture(w: u32, h: u32) -> image::RgbImage {
+    const BG: [u8; 3] = [26, 27, 38];
+    const COLORS: [[u8; 3]; 4] = [[187, 154, 247], [122, 162, 247], [158, 206, 106], [224, 175, 104]];
+    // (indent, [word lengths]) in units of w/40
+    const LINES: [(u32, &[u32]); 9] = [
+        (0, &[3, 6, 2]),
+        (2, &[4, 3, 7]),
+        (2, &[3, 5]),
+        (4, &[6, 2, 4, 3]),
+        (4, &[2, 8]),
+        (2, &[1]),
+        (0, &[1]),
+        (0, &[3, 5, 2]),
+        (2, &[5, 4]),
+    ];
+    let (bar, side) = (h / 10, w / 6);
+    let unit = (w / 40).max(1);
+    let line_h = (h - bar) / (LINES.len() as u32 + 1);
+    image::RgbImage::from_fn(w, h, |x, y| {
+        if y < bar {
+            return image::Rgb([36, 40, 59]);
+        }
+        if x < side {
+            // the file tree: a few light lines
+            let row = (y - bar) / line_h;
+            let inside = (y - bar) % line_h > line_h / 3 && (y - bar) % line_h < line_h * 2 / 3;
+            return image::Rgb(if inside && row.is_multiple_of(2) && x > side / 6 && x < side * 4 / 5 { [86, 95, 137] } else { [31, 33, 46] });
+        }
+        let row = ((y - bar) / line_h) as usize;
+        let within = (y - bar) % line_h;
+        let Some((indent, words)) = LINES.get(row) else { return image::Rgb(BG) };
+        if within < line_h / 4 || within > line_h * 3 / 4 {
+            return image::Rgb(BG);
+        }
+        let mut at = side + unit * (2 + indent);
+        for (i, len) in words.iter().enumerate() {
+            let end = at + len * unit;
+            if x >= at && x < end {
+                return image::Rgb(COLORS[(row + i) % COLORS.len()]);
+            }
+            at = end + unit;
+        }
+        image::Rgb(BG)
+    })
+}
+
+/// The call: bob's camera, kate's screen, us without video.
+pub fn in_call(app: &mut App) {
+    use tovuer_proto::VideoSource;
+    in_voice(app, "Lounge");
+    for (id, video) in [(2, VideoSource::Camera), (3, VideoSource::Screen)] {
+        if let Some(user) = app.users.iter().find(|u| u.id == id).cloned() {
+            server(app, ServerMsg::UserUpdate { user: User { video: Some(video), ..user } });
+        }
+    }
+    app.toasts.clear();
+    app.set_call_open(true);
+    let camera = picture(480, 360).into_image().map(|i| i.to_rgb8()).unwrap_or_default();
+    let frames = [(2, VideoSource::Camera, camera), (3, VideoSource::Screen, screen_picture(1280, 720))];
+    for (id, source, image) in frames {
+        app.on_video(Some(id), Arc::new(crate::video::VideoFrame { source, seq: 1, image }));
+    }
+}
+
+/// kate shares her screen in Lounge; we watch it above #general without
+/// joining voice.
+pub fn watching(app: &mut App) {
+    use tovuer_proto::VideoSource;
+    if let Some(user) = app.users.iter().find(|u| u.id == 3).cloned() {
+        server(app, ServerMsg::UserUpdate { user: User { video: Some(VideoSource::Screen), ..user } });
+    }
+    app.toasts.clear();
+    app.watch_stream(Some("kate".into()));
+    app.on_video(Some(3), Arc::new(crate::video::VideoFrame { source: VideoSource::Screen, seq: 1, image: screen_picture(1280, 720) }));
+}
+
 /// A named scene for a screenshot. An unknown name gives the main screen.
 pub fn scene(app: &mut App, name: &str) {
     if name == "login" {
@@ -186,6 +263,8 @@ pub fn scene(app: &mut App, name: &str) {
     populate(app);
     match name {
         "voice" => in_voice(app, "Lounge"),
+        "call" => in_call(app),
+        "stream" => watching(app),
         "select" => {
             in_voice(app, "Lounge");
             app.set_focus(crate::app::Focus::Messages);
@@ -193,7 +272,7 @@ pub fn scene(app: &mut App, name: &str) {
         }
         "palette" => app.open_palette(),
         "help" => app.overlay = Some(Overlay::Help { scroll: 0 }),
-        "settings" => app.overlay = Some(Overlay::Settings(SettingsView { sel: 0, mics: Some(Vec::new()), spks: Some(Vec::new()) })),
+        "settings" => app.overlay = Some(Overlay::Settings(SettingsView { sel: 0, mics: Some(Vec::new()), spks: Some(Vec::new()), cameras: Some(Vec::new()) })),
         "style" => {
             app.settings.style = TextStyle { bold: true, ..gradient("aurora") };
             app.open_style();

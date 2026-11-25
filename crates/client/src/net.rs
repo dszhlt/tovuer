@@ -14,6 +14,8 @@ use tovuer_node::{Config, Event, Network, Node, SecretKey};
 use tovuer_proto::{ClientMsg, ErrorCode, ServerMsg};
 use tovuer_voice::Engine;
 
+use crate::video::Decoder;
+
 /// Which room to join and as whom.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct NetConfig {
@@ -52,7 +54,6 @@ pub struct NodeSetup {
     pub secret: SecretKey,
     pub data_dir: PathBuf,
     pub files_dir: PathBuf,
-    pub release_dir: Option<PathBuf>,
     pub network: Network,
 }
 
@@ -62,6 +63,7 @@ pub struct NetHandle {
     cmd: mpsc::UnboundedSender<NetCmd>,
     session: Arc<AtomicU64>,
     voice: mpsc::Sender<Bytes>,
+    video: mpsc::Sender<Bytes>,
     node: Arc<Mutex<Option<Node>>>,
 }
 
@@ -93,6 +95,11 @@ impl NetHandle {
         let _ = self.voice.try_send(Bytes::from(frame));
     }
 
+    /// A video frame from our camera or screen: dropped if the network lags.
+    pub fn video(&self, frame: Bytes) {
+        let _ = self.video.try_send(frame);
+    }
+
     /// The running node — for file transfers and updates.
     pub fn node(&self) -> Option<Node> {
         self.node.lock().unwrap_or_else(|e| e.into_inner()).clone()
@@ -102,24 +109,36 @@ impl NetHandle {
     pub fn detached() -> Self {
         let (cmd, _) = mpsc::unbounded_channel();
         let (voice, _) = mpsc::channel(1);
-        Self { cmd, voice, node: Arc::default(), session: Arc::default() }
+        let (video, _) = mpsc::channel(1);
+        Self { cmd, voice, video, node: Arc::default(), session: Arc::default() }
     }
 
     /// A handle whose commands can be read back — for tests.
     pub fn recorded() -> (Self, mpsc::UnboundedReceiver<NetCmd>) {
         let (cmd, rx) = mpsc::unbounded_channel();
         let (voice, _) = mpsc::channel(1);
-        (Self { cmd, voice, node: Arc::default(), session: Arc::default() }, rx)
+        let (video, _) = mpsc::channel(1);
+        (Self { cmd, voice, video, node: Arc::default(), session: Arc::default() }, rx)
     }
 }
 
-/// Start the network task. Voice from peers goes straight into `engine`.
-pub fn spawn(events: mpsc::UnboundedSender<(u64, NetEvent)>, engine: Arc<Engine>, setup: NodeSetup) -> NetHandle {
+/// Start the network task. Voice from peers goes straight into `engine`,
+/// their video into `decoder`.
+pub fn spawn(events: mpsc::UnboundedSender<(u64, NetEvent)>, engine: Arc<Engine>, decoder: Decoder, setup: NodeSetup) -> NetHandle {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (voice_tx, voice_rx) = mpsc::channel::<Bytes>(64);
+    let (video_tx, video_rx) = mpsc::channel::<Bytes>(4);
     let node = Arc::new(Mutex::new(None));
-    tokio::spawn(run(cmd_rx, voice_rx, events, engine, setup, node.clone()));
-    NetHandle { cmd: cmd_tx, voice: voice_tx, node, session: Arc::default() }
+    let media = Media { engine, decoder };
+    tokio::spawn(run(cmd_rx, voice_rx, video_rx, events, media, setup, node.clone()));
+    NetHandle { cmd: cmd_tx, voice: voice_tx, video: video_tx, node, session: Arc::default() }
+}
+
+/// Where the voice and video of others go.
+#[derive(Clone)]
+struct Media {
+    engine: Arc<Engine>,
+    decoder: Decoder,
 }
 
 /// Pause before the next attempt: 1, 2, 4, 8, 15, 15… seconds.
@@ -137,10 +156,12 @@ struct Running {
     events: mpsc::UnboundedReceiver<Event>,
 }
 
-async fn open(cfg: &NetConfig, setup: &NodeSetup, engine: &Arc<Engine>) -> anyhow::Result<Running> {
+async fn open(cfg: &NetConfig, setup: &NodeSetup, media: &Media) -> anyhow::Result<Running> {
     let (tx, events) = mpsc::unbounded_channel();
-    let engine = engine.clone();
+    let engine = media.engine.clone();
     let sink = Arc::new(move |sender: u32, seq: u16, end: bool, data: &[u8]| engine.push(sender, seq, end, data));
+    let decoder = media.decoder.clone();
+    let video_sink = Arc::new(move |sender: u32, frame: Bytes| decoder.push(sender, frame));
     let node = Node::start(
         Config {
             room: cfg.room.clone(),
@@ -150,11 +171,11 @@ async fn open(cfg: &NetConfig, setup: &NodeSetup, engine: &Arc<Engine>) -> anyho
             secret: setup.secret.clone(),
             data_dir: setup.data_dir.clone(),
             files_dir: setup.files_dir.clone(),
-            release_dir: setup.release_dir.clone(),
             network: setup.network.clone(),
         },
         tx,
         sink,
+        video_sink,
     )
     .await?;
     Ok(Running { node, events })
@@ -163,8 +184,9 @@ async fn open(cfg: &NetConfig, setup: &NodeSetup, engine: &Arc<Engine>) -> anyho
 async fn run(
     mut cmd_rx: mpsc::UnboundedReceiver<NetCmd>,
     mut voice_rx: mpsc::Receiver<Bytes>,
+    mut video_rx: mpsc::Receiver<Bytes>,
     events: mpsc::UnboundedSender<(u64, NetEvent)>,
-    engine: Arc<Engine>,
+    media: Media,
     setup: NodeSetup,
     shared: Arc<Mutex<Option<Node>>>,
 ) {
@@ -223,6 +245,12 @@ async fn run(
                 }
                 None
             }
+            Some(frame) = video_rx.recv() => {
+                if let Some(r) = &running {
+                    r.node.video(frame);
+                }
+                None
+            }
             event = node_event => {
                 match event {
                     Some(Event::Msg(msg)) => {
@@ -253,7 +281,7 @@ async fn run(
                 r.node.shutdown().await;
             }
             let _ = events.send((session, NetEvent::Connecting { attempt, server: cfg.room.clone() }));
-            match open(&cfg, &setup, &engine).await {
+            match open(&cfg, &setup, &media).await {
                 Ok(r) => {
                     set_shared(Some(r.node.clone()));
                     running = Some(r);

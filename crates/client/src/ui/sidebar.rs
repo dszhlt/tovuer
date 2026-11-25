@@ -56,7 +56,7 @@ pub fn channels(buf: &mut Buffer, area: Rect, app: &mut App) {
     put(buf, x + 1, area.y + 1, &text::clip(&server, w as usize - 1), Style::new().fg(t.faint).bg(t.panel), w - 1);
 
     // bottom: the voice console (if we are in a channel) and the "me" row
-    let dock_h = if app.voice.is_some() { 4 } else { 0 };
+    let dock_h = if app.voice.is_some() { 5 } else { 0 };
     let me_y = area.bottom() - 1;
     let dock_y = me_y - dock_h;
     let list = Rect::new(x, area.y + 3, w, dock_y.saturating_sub(area.y + 3));
@@ -153,6 +153,14 @@ pub fn channels(buf: &mut Buffer, area: Rect, app: &mut App) {
                 if let Some((tail, tail_color)) = tail {
                     right = put_right(buf, right - 1, y, &tail, Style::new().fg(tail_color).bg(t.panel), x + 8);
                 }
+                let shows = match user.video {
+                    Some(tovuer_proto::VideoSource::Camera) => Some(Icon::Camera),
+                    Some(tovuer_proto::VideoSource::Screen) => Some(Icon::Screen),
+                    None => None,
+                };
+                if let Some(icon) = shows {
+                    right = put_right(buf, right - 1, y, app.icons.get(icon), Style::new().fg(t.info).bg(t.panel), x + 8);
+                }
                 let room = right.saturating_sub(x + 7 + 1) as usize;
                 put(buf, x + 7, y, &text::clip(&user.name, room), name_style, room as u16);
             }
@@ -218,8 +226,29 @@ fn voice_dock(buf: &mut Buffer, area: Rect, app: &App) {
         .and_then(|i| i.mic.clone())
         .unwrap_or_else(|| if session.starting { "opening devices…".into() } else { "no microphone".into() });
     put(buf, x + 1, area.y + 2, &text::clip(&device, w as usize - 2), Style::new().fg(t.faint).bg(bg), w - 2);
+
+    // line 4: video — what we show, and the way to the call
+    let (icon, label, color) = match app.sharing() {
+        Some(tovuer_proto::VideoSource::Camera) => (Icon::Camera, "CAMERA ON", t.ok),
+        Some(tovuer_proto::VideoSource::Screen) => (Icon::Screen, "SCREEN ON", t.warn),
+        None => (Icon::Camera, "Alt+V cam", t.faint),
+    };
+    put(buf, x + 1, area.y + 3, app.icons.get(icon), Style::new().fg(color).bg(bg), 2);
+    let bold = if app.sharing().is_some() { Modifier::BOLD } else { Modifier::empty() };
+    let after = put(buf, x + 4, area.y + 3, label, Style::new().fg(color).bg(bg).add_modifier(bold), w.saturating_sub(5));
+    // while showing something: how smoothly it goes; otherwise the way to the call
+    let right = match app.capture.as_ref().map(|c| c.fps()) {
+        Some(fps) if fps > 0 => format!("{fps} fps"),
+        Some(_) => "starting…".to_string(),
+        None if app.call.open => "Alt+C chat".to_string(),
+        None => "Alt+C call".to_string(),
+    };
+    if after + 2 + text::width(&right) as u16 <= x + w {
+        put_right(buf, x + w - 1, area.y + 3, &right, Style::new().fg(t.faint).bg(bg), after + 1);
+    }
+
     let hint = if w >= 34 { "Alt+M mic · Alt+D sound · /v leave" } else { "Alt+M mic · Alt+D sound" };
-    put(buf, x + 1, area.y + 3, &text::clip(hint, w as usize - 2), Style::new().fg(t.faint).bg(bg), w - 2);
+    put(buf, x + 1, area.y + 4, &text::clip(hint, w as usize - 2), Style::new().fg(t.faint).bg(bg), w - 2);
 }
 
 pub fn members(buf: &mut Buffer, area: Rect, app: &App) {

@@ -348,6 +348,31 @@ fn slash_commands_change_settings() {
     assert!(!h.app.engine.controls().denoise.load(std::sync::atomic::Ordering::Relaxed));
     h.say("/denoise");
     assert!(h.app.settings.denoise, "without an argument it toggles");
+    h.say("/denoise strong");
+    assert_eq!(h.app.engine.controls().denoise_strength(), tovuer_voice::Strength::Strong);
+    h.say("/denoise off");
+    h.say("/denoise");
+    assert_eq!(h.app.denoise_mode(), "strong", "back on at the strength it had");
+    h.say("/denoise loud");
+    assert_eq!((h.app.denoise_mode(), h.last_toast().0), ("strong", Tone::Warn));
+    h.say("/denoise soft");
+    assert_eq!(h.app.engine.controls().denoise_strength(), tovuer_voice::Strength::Soft);
+    // in the settings window ← → walk off · soft · normal · strong
+    h.key(KeyCode::F(2));
+    let row = tovuer::app::overlay::Setting::ALL.iter().position(|s| *s == tovuer::app::overlay::Setting::Denoise).unwrap();
+    if let Some(Overlay::Settings(view)) = h.app.overlay.as_mut() {
+        view.sel = row;
+    }
+    h.key(KeyCode::Right);
+    assert_eq!(h.app.denoise_mode(), "normal");
+    h.key(KeyCode::Left);
+    h.key(KeyCode::Left);
+    assert_eq!(h.app.denoise_mode(), "off");
+    assert!(!h.app.engine.controls().denoise.load(std::sync::atomic::Ordering::Relaxed));
+    h.key(KeyCode::Left);
+    assert_eq!(h.app.denoise_mode(), "strong", "round the circle");
+    h.key(KeyCode::Esc);
+    assert_eq!(h.app.paths.load_settings().denoise_level, 2, "kept for next time");
     h.say("/volume 150");
     assert_eq!(h.app.engine.controls().out_gain(), 1.5);
     h.say("/volume 900");
@@ -640,7 +665,7 @@ fn voice_presence_follows_keys_and_server() {
     );
     assert_eq!(h.app.voice.as_ref().unwrap().channel, "Lounge");
     h.server(ServerMsg::UserUpdate {
-        user: tovuer_proto::User { id: 1, name: "dana".into(), voice: Some("Lounge".into()), muted: false, deafened: false, admin: true },
+        user: tovuer_proto::User { id: 1, name: "dana".into(), voice: Some("Lounge".into()), muted: false, deafened: false, admin: true, video: None },
     });
     let text = h.screen(120, 40);
     assert!(text.contains("AUDIO…"), "while the devices open, the console says so:\n{text}");
@@ -738,9 +763,8 @@ fn reconnect_restores_voice_and_refetches_history() {
         proto: tovuer_proto::PROTO_VERSION,
         admin: false,
         channels: vec![Channel::text("general", "new topic"), Channel::text("random", ""), Channel::voice("Lounge")],
-        users: vec![tovuer_proto::User { id: 9, name: "dana".into(), voice: None, muted: false, deafened: false, admin: false }],
+        users: vec![tovuer_proto::User { id: 9, name: "dana".into(), voice: None, muted: false, deafened: false, admin: false, video: None }],
         max_file: 1 << 20,
-        client_version: Some("9.9.9".into()),
         motd: None,
     });
     assert_eq!(h.app.conn, Conn::Online);
@@ -753,7 +777,10 @@ fn reconnect_restores_voice_and_refetches_history() {
     // the conversation and the place in it are kept, the topic is updated
     assert_eq!(h.channel("general").messages.len(), 12);
     assert_eq!(h.channel("general").topic, "new topic");
+    // a newer release found on GitHub at start
+    h.app.on_task(TaskEvent::UpdateFound("9.9.9".into()));
     assert_eq!(h.app.update_available.as_deref(), Some("9.9.9"));
+    assert!(h.last_toast().1.contains("tovuer 9.9.9 is out — /update"));
     assert!(h.screen(140, 40).contains("version 9.9.9 is out: /update"));
 }
 
@@ -898,7 +925,8 @@ fn settings_window_edits_and_saves() {
     let text = h.screen(120, 40);
     assert!(text.contains("Transparent background") && text.contains("‹ on ›"), "{text}");
     // the mouse turns on at once, without a restart
-    for _ in 0..6 {
+    let mouse = tovuer::app::overlay::Setting::ALL.iter().position(|s| *s == tovuer::app::overlay::Setting::Mouse).unwrap();
+    for _ in 1..mouse {
         h.key(KeyCode::Down);
     }
     h.key(KeyCode::Char(' '));
@@ -926,7 +954,7 @@ fn channel_list_follows_the_server() {
     assert!(text.contains("# fresh") && !text.contains("# random"));
 
     // people come and go
-    h.server(ServerMsg::UserJoin { user: tovuer_proto::User { id: 7, name: "yana".into(), voice: None, muted: false, deafened: false, admin: false } });
+    h.server(ServerMsg::UserJoin { user: tovuer_proto::User { id: 7, name: "yana".into(), voice: None, muted: false, deafened: false, admin: false, video: None } });
     assert!(h.screen(120, 40).contains("ONLINE — 5"));
     h.server(ServerMsg::UserLeave { id: 7 });
     h.server(ServerMsg::UserLeave { id: 2 });
@@ -1034,7 +1062,7 @@ fn feed_pictures_get_real_pixels_when_wholly_in_view() {
     let img = demo::picture(480, 270).into_image().unwrap();
     let sharp = Sharp::encode_filled(&img, &graphics, cells.0, cells.1).unwrap();
     assert_eq!(sharp.size(), cells, "it covers exactly the thumbnail's cells");
-    h.app.on_task(TaskEvent::SharpThumb { file_id: file.id.clone(), cells, result: Ok(Arc::new(sharp)) });
+    h.app.on_task(TaskEvent::SharpThumb { file_id: file.id.clone(), cells, result: Ok(tovuer::motion::Pixels::Still(Arc::new(sharp))) });
     let buf = draw(&mut h);
     let at = sixel_at(&buf).expect("real pixels in the feed");
     assert!(!has_blocks(&buf), "they replace the blocks");
@@ -1226,7 +1254,7 @@ fn welcome_to(room: &str, channels: Vec<Channel>) -> ServerMsg {
     ServerMsg::Welcome {
         id: 1, name: "dana".into(), server: room.into(), admin: false,
         proto: tovuer_proto::PROTO_VERSION, version: "test".into(), channels, users: vec![],
-        max_file: 1 << 20, client_version: None, motd: None,
+        max_file: 1 << 20, motd: None,
     }
 }
 
@@ -1420,4 +1448,348 @@ fn your_own_message_style_travels_with_what_you_send() {
     h.app.ui.invalidate();
     let cell = find(&mut h);
     assert_eq!(cell.fg, h.app.theme.text, "styles of others are off: plain text");
+}
+
+/// A frame of one flat color, as the decoder hands it over.
+fn flat_frame(source: tovuer_proto::VideoSource, seq: u32, rgb: [u8; 3]) -> std::sync::Arc<tovuer::video::VideoFrame> {
+    std::sync::Arc::new(tovuer::video::VideoFrame { source, seq, image: image::RgbImage::from_pixel(64, 48, image::Rgb(rgb)) })
+}
+
+fn user_in(id: u32, name: &str, voice: &str, video: Option<tovuer_proto::VideoSource>) -> tovuer_proto::User {
+    tovuer_proto::User { id, name: name.into(), voice: Some(voice.into()), muted: false, deafened: false, admin: false, video }
+}
+
+/// Cells drawn as video in this color (half-blocks for cameras, whole
+/// cells of sextants for screens).
+fn video_cells(buf: &Buffer, rgb: [u8; 3]) -> usize {
+    let color = ratatui::style::Color::Rgb(rgb[0], rgb[1], rgb[2]);
+    buf.content().iter().filter(|c| matches!(c.symbol(), "▀" | "█") && c.fg == color && c.bg == color).count()
+}
+
+fn draw(h: &mut Harness, w: u16, rows: u16) -> Buffer {
+    let area = Rect::new(0, 0, w, rows);
+    let mut buf = Buffer::empty(area);
+    ui::render(&mut buf, area, &mut h.app);
+    buf
+}
+
+#[test]
+fn the_call_shows_everyone_and_the_video_of_those_who_show_it() {
+    use tovuer_proto::VideoSource;
+    let mut h = Harness::online("call");
+    h.chord(KeyCode::Char('c'), KeyModifiers::ALT);
+    assert!(h.last_toast().1.contains("join a voice channel"), "no voice channel, no call");
+
+    h.say("/v lounge");
+    h.sent();
+    // someone turns the camera on while we read the chat: a hint, no video yet
+    h.server(ServerMsg::UserUpdate { user: user_in(2, "bob", "Lounge", Some(VideoSource::Camera)) });
+    assert!(h.last_toast().1.contains("bob turned the camera on — Alt+C"), "{:?}", h.last_toast());
+    h.app.on_task(TaskEvent::Video { from: Some(2), frame: flat_frame(VideoSource::Camera, 1, [200, 30, 30]) });
+    assert!(h.app.call.frames.is_empty(), "not watching: frames are not kept");
+
+    h.chord(KeyCode::Char('c'), KeyModifiers::ALT);
+    assert_eq!(h.sent(), vec![ClientMsg::Video { source: None, watching: true, stream: None }]);
+    assert!(h.app.call_open());
+    let text = h.screen(120, 32);
+    for want in ["Lounge · 3 in the call", "dana (you)", "bob", "kate", "Alt+C — back to #general", "CALL"] {
+        assert!(text.contains(want), "{want:?} missing:\n{text}");
+    }
+    assert!(text.contains("camera…"), "bob's video is on its way:\n{text}");
+
+    h.app.on_task(TaskEvent::Video { from: Some(2), frame: flat_frame(VideoSource::Camera, 2, [200, 30, 30]) });
+    // only people in the call with video on are shown
+    h.app.on_task(TaskEvent::Video { from: Some(4), frame: flat_frame(VideoSource::Camera, 1, [30, 200, 30]) });
+    let buf = draw(&mut h, 120, 32);
+    assert!(video_cells(&buf, [200, 30, 30]) > 100, "bob's camera fills his tile");
+    assert_eq!(video_cells(&buf, [30, 200, 30]), 0, "oleg is not in the call");
+    assert!(h.app.dirty, "drawn");
+    h.app.dirty = false;
+    h.app.on_task(TaskEvent::Video { from: Some(2), frame: flat_frame(VideoSource::Camera, 3, [200, 30, 30]) });
+    assert!(!h.app.dirty, "a frame waits for the tick");
+    h.app.on_tick();
+    assert!(h.app.dirty);
+
+    // pick bob's tile and make it big
+    h.chord(KeyCode::BackTab, KeyModifiers::SHIFT);
+    assert_eq!(h.app.focus, Focus::Messages);
+    h.key(KeyCode::Right);
+    h.key(KeyCode::Enter);
+    assert_eq!(h.app.call.focus, Some(2));
+    let big = draw(&mut h, 120, 32);
+    assert!(video_cells(&big, [200, 30, 30]) > video_cells(&buf, [200, 30, 30]), "bigger alone");
+    assert!(h.screen(120, 32).contains("also here: dana · kate"));
+    h.key(KeyCode::Esc);
+    assert_eq!(h.app.call.focus, None, "Esc first brings everyone back");
+    h.key(KeyCode::Esc);
+    assert_eq!(h.app.focus, Focus::Input);
+
+    // a click on a tile makes it big too
+    h.app.settings.mouse = true;
+    draw(&mut h, 120, 32);
+    let (rect, _) = h.app.ui.hits.iter().find(|(_, hit)| *hit == ui::Hit::Tile(3)).cloned().expect("kate's tile");
+    h.app.on_mouse(crossterm::event::MouseEvent {
+        kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        column: rect.x + 2,
+        row: rect.y + 2,
+        modifiers: KeyModifiers::NONE,
+    });
+    assert_eq!(h.app.call.focus, Some(3));
+
+    // the camera off: the frame goes; back to the chat: watching stops
+    h.server(ServerMsg::UserUpdate { user: user_in(2, "bob", "Lounge", None) });
+    assert!(!h.app.call.frames.contains_key(&2));
+    h.chord(KeyCode::Char('c'), KeyModifiers::ALT);
+    assert_eq!(h.sent(), vec![ClientMsg::Video { source: None, watching: false, stream: None }]);
+    assert!(!h.screen(120, 32).contains("in the call"), "the feed is back");
+}
+
+#[test]
+fn the_camera_goes_with_the_voice_channel() {
+    use tovuer_proto::VideoSource;
+    let mut h = Harness::online("camera");
+    // nothing real is opened in tests
+    h.app.settings.camera = "no-such-camera-in-tests".into();
+    h.chord(KeyCode::Char('v'), KeyModifiers::ALT);
+    assert!(h.app.capture.is_none() && h.last_toast().1.contains("join a voice channel"));
+
+    h.say("/v lounge");
+    h.sent();
+    h.chord(KeyCode::Char('v'), KeyModifiers::ALT);
+    assert_eq!(h.app.sharing(), Some(VideoSource::Camera));
+    assert_eq!(h.sent(), vec![ClientMsg::Video { source: Some(VideoSource::Camera), watching: true, stream: None }], "the call opens to show you");
+    assert!(h.app.call_open());
+
+    // our own frames show mirrored in our tile; a stale screen frame does not
+    h.app.on_task(TaskEvent::Video { from: None, frame: flat_frame(VideoSource::Camera, 1, [20, 20, 220]) });
+    h.app.on_task(TaskEvent::Video { from: None, frame: flat_frame(VideoSource::Screen, 1, [220, 220, 20]) });
+    let buf = draw(&mut h, 120, 32);
+    assert!(video_cells(&buf, [20, 20, 220]) > 100);
+    assert_eq!(video_cells(&buf, [220, 220, 20]), 0);
+    let text = h.screen(120, 32);
+    assert!(text.contains("CAMERA ON"), "the voice console says the camera is on:\n{text}");
+
+    // the camera fails: it is off again, and everyone is told
+    h.app.on_task(TaskEvent::VideoEnded { source: VideoSource::Camera, error: Some("no camera found on this computer".into()) });
+    assert!(h.app.sharing().is_none());
+    assert_eq!(h.sent(), vec![ClientMsg::Video { source: None, watching: true, stream: None }]);
+    assert_eq!(h.last_toast().0, Tone::Error);
+    assert!(h.app.call.frames.is_empty());
+
+    h.say("/cam on");
+    assert_eq!(h.app.sharing(), Some(VideoSource::Camera));
+    h.say("/cam");
+    assert!(h.app.sharing().is_none(), "/cam toggles");
+    h.say("/cam on");
+    h.sent();
+    // leaving voice turns it off and closes the call
+    h.say("/v");
+    assert!(h.app.sharing().is_none() && !h.app.call_open());
+    assert_eq!(h.sent(), vec![ClientMsg::VoiceLeave]);
+}
+
+#[test]
+fn call_video_gets_real_pixels_frame_after_frame() {
+    use std::sync::Arc;
+    use ratatui_image::picker::{Picker, ProtocolType};
+    use tovuer_proto::VideoSource;
+
+    let mut h = Harness::online("call-sharp");
+    h.say("/v lounge");
+    h.server(ServerMsg::UserUpdate { user: user_in(2, "bob", "Lounge", Some(VideoSource::Camera)) });
+    h.chord(KeyCode::Char('c'), KeyModifiers::ALT);
+    let mut graphics = Picker::halfblocks();
+    graphics.set_protocol_type(ProtocolType::Sixel);
+    h.app.graphics = Some(graphics.clone());
+    let sixels = |buf: &Buffer| buf.content().iter().filter(|c| c.symbol().contains("\x1bP")).count();
+
+    let frame = flat_frame(VideoSource::Camera, 1, [200, 30, 30]);
+    h.app.on_task(TaskEvent::Video { from: Some(2), frame: frame.clone() });
+    let buf = draw(&mut h, 120, 32);
+    assert_eq!(sixels(&buf), 0, "blocks until the tile is encoded");
+    let (user, cells) = h.app.ui.want_sharp_video.pop().expect("the tile asks for real pixels");
+    assert_eq!(user, 2);
+
+    let encode = |frame: &tovuer::video::VideoFrame| {
+        let sharp = tovuer::video::encode_sharp(&frame.image, false, &graphics, cells.0, cells.1, [24, 24, 28], tovuer::video::kitty_id(2)).unwrap();
+        assert_eq!(sharp.size(), cells, "it covers the whole video area of the tile");
+        Arc::new(sharp)
+    };
+    h.app.call.sharp.entry(2).or_default().busy = true;
+    h.app.on_task(TaskEvent::SharpVideo { user: 2, seq: 1, cells, result: Ok(encode(&frame)) });
+    let buf = draw(&mut h, 120, 32);
+    assert_eq!(sixels(&buf), 1, "real pixels in bob's tile");
+    draw(&mut h, 120, 32);
+    assert!(!h.app.ui.repaint);
+
+    // the next frame: the old picture stays until the new one is encoded, in the same place
+    let next = flat_frame(VideoSource::Camera, 2, [30, 30, 200]);
+    h.app.on_task(TaskEvent::Video { from: Some(2), frame: next.clone() });
+    assert_eq!(sixels(&draw(&mut h, 120, 32)), 1);
+    assert_eq!(h.app.ui.want_sharp_video.pop(), Some((2, cells)), "the newer frame is asked for");
+    h.app.on_task(TaskEvent::SharpVideo { user: 2, seq: 2, cells, result: Ok(encode(&next)) });
+    assert_eq!(sixels(&draw(&mut h, 120, 32)), 1);
+    assert!(!h.app.ui.repaint, "a new frame in the same place repaints nothing else");
+
+    // Kitty: every frame of a tile reuses one image id, so the terminal replaces it
+    let mut kitty = Picker::halfblocks();
+    kitty.set_protocol_type(ProtocolType::Kitty);
+    let a = tovuer::video::encode_sharp(&frame.image, false, &kitty, 10, 4, [0, 0, 0], tovuer::video::kitty_id(2)).unwrap();
+    let b = tovuer::video::encode_sharp(&next.image, true, &kitty, 10, 4, [0, 0, 0], tovuer::video::kitty_id(2)).unwrap();
+    let transmit = |s: &tovuer::transfer::Sharp| {
+        let area = Rect::new(0, 0, 10, 4);
+        let mut buf = Buffer::empty(area);
+        ratatui::widgets::Widget::render(ratatui_image::Image::new(&s.proto), area, &mut buf);
+        let first = buf[(0, 0)].symbol().to_string();
+        first.split(',').find(|p| p.starts_with("i=")).map(str::to_string).expect("a kitty image id")
+    };
+    assert_eq!(transmit(&a), transmit(&b));
+
+    // Kitty stretches a frame over its cells: it gets the frame's own pixels, not the cells'
+    let frame = flat_frame(VideoSource::Camera, 3, [90, 90, 90]);
+    let big = tovuer::video::encode_sharp(&frame.image, false, &kitty, 80, 24, [0, 0, 0], 7).unwrap();
+    assert!(big.stretch);
+    let area = Rect::new(0, 0, 80, 24);
+    let mut buf = Buffer::empty(area);
+    ratatui::widgets::Widget::render(ratatui_image::Image::new(&big.proto), area, &mut buf);
+    big.stretch(&mut buf, area);
+    let first = buf[(0, 0)].symbol().to_string();
+    assert!(first.contains("a=T,U=1,c=80,r=24,"), "{}", &first[..first.len().min(120)]);
+    let width: u32 = first.split(',').find_map(|p| p.strip_prefix("s=")).unwrap().parse().unwrap();
+    // the 64×48 frame in 80×24 cells of 10×20 px: 80 px wide (it keeps the cells' shape), not 800
+    assert_eq!(width, 80, "sent at the frame's size, not the cells'");
+}
+
+#[test]
+fn gifs_and_videos_move_in_the_feed() {
+    use std::sync::Arc;
+    use ratatui_image::picker::{Picker, ProtocolType};
+    use tovuer::app::SharpThumb;
+    use tovuer::motion::{Clip, Pixels, anim_for, sharp_clip};
+
+    let mut h = Harness::online("moving");
+    let gif = tovuer_proto::FileMeta { id: "ef".repeat(16), name: "cat.gif".into(), size: 300_000, image: true };
+    h.server(ServerMsg::Msg {
+        msg: Message {
+            id: 41,
+            channel: "general".into(),
+            from: "kate".into(),
+            ts: tovuer_proto::now_ms(),
+            text: String::new(),
+            reply: None,
+            edited: None,
+            file: Some(gif.clone()),
+            reactions: Vec::new(),
+            system: false,
+            style: None,
+        },
+    });
+    // two frames, red then blue, 100 ms each; the still picture is grey
+    let solid = |rgb: [u8; 3]| image::RgbImage::from_pixel(64, 36, image::Rgb(rgb));
+    let clip = Clip { frames: vec![(solid([220, 20, 20]), 100), (solid([20, 20, 220]), 100)] };
+    let mut thumb = tovuer::transfer::Picture { w: 64, h: 36, rgb: solid([120, 120, 120]).into_raw(), full: (64, 36), duration: None }
+        .fit(tovuer::transfer::THUMB_COLS, tovuer::transfer::THUMB_ROWS);
+    thumb.anim = Some(Arc::new(anim_for(&clip, thumb.w, thumb.h)));
+    h.app.on_task(TaskEvent::Thumb { file_id: gif.id.clone(), result: Ok(thumb) });
+
+    let cells = |h: &mut Harness, rgb: [u8; 3]| video_cells(&draw(h, 120, 40), rgb);
+    h.app.ui.frozen = Some(30);
+    assert!(cells(&mut h, [220, 20, 20]) > 50, "the first frame");
+    assert!(h.app.ui.animating, "frames keep the screen redrawing");
+    h.app.ui.frozen = Some(130);
+    assert!(cells(&mut h, [20, 20, 220]) > 50, "the second frame");
+    assert_eq!(cells(&mut h, [220, 20, 20]), 0);
+    h.app.ui.frozen = Some(230);
+    assert!(cells(&mut h, [220, 20, 20]) > 50, "and round again");
+
+    // the window is not looked at: it stands still on its picture
+    h.app.on_focus(false);
+    assert!(cells(&mut h, [120, 120, 120]) > 50);
+    h.app.on_focus(true);
+    h.say("/animate off");
+    assert!(!h.app.settings.animate);
+    assert!(cells(&mut h, [120, 120, 120]) > 50, "switched off: the still picture");
+    h.say("/animate on");
+
+    // real pixels: every frame encoded once, shown in turn
+    let mut graphics = Picker::halfblocks();
+    graphics.set_protocol_type(ProtocolType::Sixel);
+    h.app.graphics = Some(graphics.clone());
+    draw(&mut h, 120, 40);
+    let (file, size) = h.app.ui.want_sharp_thumbs.pop().expect("the thumbnail asks for real pixels");
+    h.app.sharp_thumbs.insert(file.id.clone(), SharpThumb::Loading(size));
+    let pixels = Pixels::Moving(Arc::new(sharp_clip(&clip, &graphics, size).unwrap()));
+    h.app.on_task(TaskEvent::SharpThumb { file_id: file.id.clone(), cells: size, result: Ok(pixels) });
+    let sixel = |h: &mut Harness| draw(h, 120, 40).content().iter().find(|c| c.symbol().contains("\x1bP")).map(|c| c.symbol().to_string());
+    h.app.ui.frozen = Some(30);
+    let red = sixel(&mut h).expect("a frame in real pixels");
+    h.app.ui.frozen = Some(130);
+    let blue = sixel(&mut h).expect("the next one");
+    assert_ne!(red, blue);
+    assert!(!h.app.ui.repaint, "a new frame in the same place repaints nothing else");
+}
+
+#[test]
+fn a_shared_screen_is_watched_above_the_chat_without_joining_voice() {
+    use tovuer_proto::VideoSource;
+    let mut h = Harness::online("stream");
+    h.say("/watch");
+    assert!(h.last_toast().1.contains("nobody is sharing a screen"));
+
+    // kate goes live in Lounge; we are in no voice channel
+    h.server(ServerMsg::UserUpdate { user: user_in(3, "kate", "Lounge", Some(VideoSource::Screen)) });
+    assert!(h.last_toast().1.contains("kate is live in Lounge — Alt+W to watch"), "{:?}", h.last_toast());
+    let text = h.screen(120, 40);
+    assert!(text.contains("LIVE") && text.contains("kate is sharing the screen in Lounge"), "{text}");
+    // her frames do not come before we ask
+    h.app.on_task(TaskEvent::Video { from: Some(3), frame: flat_frame(VideoSource::Screen, 1, [30, 160, 90]) });
+    assert!(h.app.call.frames.is_empty());
+
+    h.chord(KeyCode::Char('w'), KeyModifiers::ALT);
+    assert_eq!(h.sent(), vec![ClientMsg::Video { source: None, watching: false, stream: Some("kate".into()) }]);
+    assert!(h.screen(120, 40).contains("connecting to kate's screen"));
+    h.app.on_task(TaskEvent::Video { from: Some(3), frame: flat_frame(VideoSource::Screen, 2, [30, 160, 90]) });
+    // not hers, or not a screen: nothing
+    h.app.on_task(TaskEvent::Video { from: Some(2), frame: flat_frame(VideoSource::Screen, 1, [200, 200, 20]) });
+    let buf = draw(&mut h, 120, 40);
+    assert!(video_cells(&buf, [30, 160, 90]) > 300, "her screen above the feed");
+    assert!(buf.content().iter().any(|c| c.symbol() == "█"), "a screen is drawn in sextants, not half-blocks");
+    assert_eq!(video_cells(&buf, [200, 200, 20]), 0);
+    let text = h.screen(120, 40);
+    assert!(text.contains("kate · screen · Lounge") && text.contains("Message #general"), "the chat stays:\n{text}");
+    assert!(h.app.channel().unwrap().messages.len() > 3);
+
+    // the whole window for her screen: more cells, more detail; letters do not type
+    let small = video_cells(&buf, [30, 160, 90]);
+    h.chord(KeyCode::Char('f'), KeyModifiers::ALT);
+    assert!(h.app.stream_full());
+    let big = draw(&mut h, 120, 40);
+    assert!(video_cells(&big, [30, 160, 90]) > small * 3 / 2, "bigger over the whole window");
+    let text = h.screen(120, 40);
+    assert!(text.contains("Esc or Alt+F — back to the chat") && !text.contains("Message #general"), "{text}");
+    h.typed("x");
+    assert_eq!(h.app.input.text(), "");
+    h.key(KeyCode::Esc);
+    assert!(!h.app.stream_full() && h.app.watched().is_some(), "back to the chat, still watching");
+
+    // she mutes: the picture stays; the palette offers to stop
+    h.server(ServerMsg::UserUpdate { user: tovuer_proto::User { muted: true, ..user_in(3, "kate", "Lounge", Some(VideoSource::Screen)) } });
+    assert!(h.app.call.frames.contains_key(&3));
+    h.key(KeyCode::Char('k'));
+    h.key(KeyCode::Backspace);
+    h.chord(KeyCode::Char('k'), KeyModifiers::CONTROL);
+    assert!(h.screen(120, 40).contains("Stop watching kate's screen"));
+    h.key(KeyCode::Esc);
+
+    // she stops: so do we
+    h.server(ServerMsg::UserUpdate { user: user_in(3, "kate", "Lounge", None) });
+    assert!(h.app.watch.is_none() && h.app.call.frames.is_empty());
+    assert!(h.last_toast().1.contains("kate's stream ended"));
+    assert_eq!(h.sent(), vec![ClientMsg::Video { source: None, watching: false, stream: None }]);
+    assert!(!h.screen(120, 40).contains("LIVE"));
+
+    h.say("/watch kate");
+    assert!(h.last_toast().1.contains("not sharing a screen"));
+    h.say("/watch nobody");
+    assert!(h.last_toast().1.contains("nobody called"));
 }

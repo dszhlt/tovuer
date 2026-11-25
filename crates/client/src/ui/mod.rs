@@ -1,6 +1,7 @@
 //! Drawing. The screen is rebuilt every frame from the [`App`] state; small
 //! drawing primitives and the main screen layout live here too.
 
+pub mod call;
 pub mod chat;
 pub mod icons;
 pub mod look;
@@ -30,6 +31,12 @@ pub enum Hit {
     NewChannel(ChannelKind),
     Message(u64),
     Input,
+    /// A tile of the call (user id).
+    Tile(u32),
+    /// The line saying who is live, above the feed.
+    Live,
+    /// The watched screen itself.
+    Stream,
 }
 
 /// A picture drawn with blocks, wholly in view: real pixels go there at the
@@ -66,6 +73,10 @@ pub struct UiState {
     pub want_sharp: Option<(FileMeta, (u16, u16))>,
     /// Feed thumbnails wanted in the terminal's own graphics, for so many cells.
     pub want_sharp_thumbs: Vec<(FileMeta, (u16, u16))>,
+    /// Video tiles wanted in the terminal's own graphics: user id, cells.
+    pub want_sharp_video: Vec<(u32, (u16, u16))>,
+    /// Video frames scaled for their tiles, by user id.
+    pub video: HashMap<u32, call::Scaled>,
     /// This frame's places for sharp feed thumbnails.
     pub spots: Vec<Spot>,
     /// Where this frame put Sixel/iTerm2 thumbnails.
@@ -86,9 +97,21 @@ pub struct UiState {
     pub last_dir: Option<PathBuf>,
     /// The window is too narrow — the channel list is hidden.
     pub side_hidden: bool,
+    /// When moving previews started; their frames follow this clock.
+    pub clock: Option<std::time::Instant>,
+    /// A fixed point on that clock, in ms (tests and screenshots).
+    pub frozen: Option<u64>,
 }
 
 impl UiState {
+    /// Where moving previews are, in ms.
+    pub fn anim_ms(&mut self) -> u64 {
+        if let Some(ms) = self.frozen {
+            return ms;
+        }
+        self.clock.get_or_insert_with(std::time::Instant::now).elapsed().as_millis() as u64
+    }
+
     /// Drop the layout cache (the theme, width or channel list changed).
     pub fn invalidate(&mut self) {
         self.generation = self.generation.wrapping_add(1);
@@ -206,7 +229,7 @@ pub fn dim(buf: &mut Buffer, area: Rect, theme: &Theme) {
     for y in area.y..area.bottom() {
         for x in area.x..area.right() {
             if let Some(cell) = buf.cell_mut((x, y))
-                && cell.symbol() != "▀"
+                && !is_dots(cell.symbol())
             {
                 cell.set_fg(theme.faint);
                 cell.modifier = Modifier::empty();
@@ -216,6 +239,11 @@ pub fn dim(buf: &mut Buffer, area: Rect, theme: &Theme) {
             }
         }
     }
+}
+
+/// A cell of a picture drawn with blocks (half-blocks, sextants).
+fn is_dots(symbol: &str) -> bool {
+    matches!(symbol, "▀" | "█" | "▌" | "▐") || symbol.chars().next().is_some_and(|c| ('\u{1FB00}'..='\u{1FB3B}').contains(&c))
 }
 
 pub fn tone_color(theme: &Theme, tone: Tone) -> Color {
@@ -304,7 +332,15 @@ fn sharp_thumbs(buf: &mut Buffer, app: &mut App) {
         let sharp = match spot.image {
             SpotImage::Ready(sharp) => sharp,
             SpotImage::Feed(file) => match app.sharp_thumbs.get(&file.id) {
-                Some(SharpThumb::Ready(sharp)) if sharp.size() == cells => sharp.clone(),
+                Some(SharpThumb::Ready(pixels)) if pixels.size() == cells => {
+                    let moving = pixels.moving() && app.animating_previews();
+                    let ms = if moving { app.ui.anim_ms() } else { 0 };
+                    app.ui.animating |= moving;
+                    match app.sharp_thumbs.get(&file.id) {
+                        Some(SharpThumb::Ready(pixels)) => pixels.at(ms).clone(),
+                        _ => continue,
+                    }
+                }
                 Some(SharpThumb::Loading(asked)) if *asked == cells => continue,
                 Some(SharpThumb::Failed) => continue,
                 _ => {
@@ -317,6 +353,7 @@ fn sharp_thumbs(buf: &mut Buffer, app: &mut App) {
             continue;
         }
         ratatui_image::Image::new(&sharp.proto).render(spot.rect, buf);
+        sharp.stretch(buf, spot.rect);
         if sharp.fragile() {
             app.ui.fragile_now = true;
             app.ui.placed.push(spot.rect);
@@ -362,8 +399,15 @@ pub fn side_widths(width: u16, members_on: bool) -> (u16, u16) {
 
 fn main_screen(buf: &mut Buffer, area: Rect, app: &mut App) -> Option<(u16, u16)> {
     let t = app.theme.clone();
+    // a watched screen over the whole window: nothing else but the status line
+    if app.stream_full() {
+        call::stream_full(buf, Rect::new(area.x, area.y, area.width, area.height - 1), app);
+        status_bar(buf, Rect::new(area.x, area.bottom() - 1, area.width, 1), app);
+        return None;
+    }
     let body = Rect::new(area.x, area.y, area.width, area.height - 1);
-    let (side_w, mem_w) = side_widths(area.width, app.settings.members);
+    // the call takes the member panel's room: who is there is in the tiles
+    let (side_w, mem_w) = side_widths(area.width, app.settings.members && !app.call_open());
 
     app.ui.side_hidden = side_w == 0;
     let side = Rect::new(body.x, body.y, side_w, body.height);
@@ -395,7 +439,11 @@ fn status_bar(buf: &mut Buffer, area: Rect, app: &App) {
     let t = &app.theme;
     fill(buf, area, Style::new().fg(t.dim).bg(t.panel));
     let (label, hints) = match app.focus {
+        _ if app.stream_full() => ("LIVE", "Esc or Alt+F — back to the chat · Alt+W next / stop watching"),
+        Focus::Input if app.call_open() => ("CALL", "Alt+C chat · Alt+V camera · Alt+S screen · Shift+Tab tiles · Enter send · F1 help"),
+        Focus::Messages if app.call_open() => ("TILES", "←→ pick · Enter big / everyone · Esc input"),
         Focus::Input if app.ui.side_hidden => ("INPUT", "Ctrl+K channels · F1 help"),
+        Focus::Input if app.watched().is_some() => ("INPUT", "Enter send · Alt+F full window · Alt+W next / stop watching · F1 help"),
         Focus::Input => ("INPUT", "Enter send · Tab channels · Ctrl+K commands · Ctrl+O file · F1 help"),
         Focus::Sidebar if app.is_admin() => ("CHANNELS", "↑↓ pick · Enter open/join · n new text · v new voice · Del delete · t topic · Esc"),
         Focus::Sidebar => ("CHANNELS", "↑↓ pick · Enter open/join · n new text · v new voice · t topic · Esc to input"),

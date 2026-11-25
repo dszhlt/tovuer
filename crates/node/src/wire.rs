@@ -2,22 +2,24 @@
 //!
 //! One QUIC connection per pair of peers. Every bidirectional stream starts
 //! with a one-byte tag: `C` — the control stream (handshake, then frames for
-//! the whole life of the connection), `F` — a file request, `U` — an update
-//! request. Frames are a 4-byte big-endian length and JSON. Voice goes as
-//! unreliable QUIC datagrams in the [`tovuer_proto::voice`] format.
+//! the whole life of the connection), `F` — a file request. Frames are a 4-byte big-endian length and JSON. Voice goes as
+//! unreliable QUIC datagrams in the [`tovuer_proto::voice`] format; video
+//! as one unidirectional stream per frame: the tag `V`, then a
+//! [`tovuer_proto::video`] frame.
 
 use std::collections::BTreeMap;
 
 use iroh::EndpointAddr;
 use iroh::endpoint::{RecvStream, SendStream};
 use serde::{Deserialize, Serialize};
+use tovuer_proto::VideoSource;
 
 use crate::ops::Op;
 
 pub const ALPN: &[u8] = b"tovuer/4";
 pub const TAG_CONTROL: u8 = b'C';
 pub const TAG_FILE: u8 = b'F';
-pub const TAG_UPDATE: u8 = b'U';
+pub const TAG_VIDEO: u8 = b'V';
 /// Biggest frame we accept (a batch of operations).
 pub const MAX_FRAME: usize = 4 << 20;
 /// Operations per `Ops` frame when catching someone up.
@@ -32,10 +34,16 @@ pub struct PeerState {
     pub voice: Option<String>,
     pub muted: bool,
     pub deafened: bool,
-    pub version: String,
-    /// Client release this peer hands out for `/update` (the owner does).
+    /// Camera or screen on, in the voice channel.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub release: Option<String>,
+    pub video: Option<VideoSource>,
+    /// Looking at the call: wants the video of the channel.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub watching: bool,
+    /// Watching this member's screen from a text channel (their nick).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<String>,
+    pub version: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -65,13 +73,8 @@ pub enum Frame {
     Typing { channel: String },
     Speaking { on: bool },
     FileReq { id: String },
-    UpdateReq { asset: String },
-    /// Answer to a file or update request; the bytes follow the frame.
-    Blob {
-        size: u64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        version: Option<String>,
-    },
+    /// Answer to a file request; the bytes follow the frame.
+    Blob { size: u64 },
     Missing,
     #[serde(other)]
     Unknown,

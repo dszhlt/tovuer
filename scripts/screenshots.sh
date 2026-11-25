@@ -25,6 +25,8 @@ shot() {  # <file> <scene> <theme> <columns> <rows>
 }
 
 shot "$OUT/main.png" voice tovuer 120 34
+shot "$OUT/call.png" call tovuer 120 34
+shot "$OUT/stream.png" stream tovuer 120 34
 shot "$OUT/palette.png" palette catppuccin 100 28
 shot "$OUT/settings.png" settings nord 100 28
 shot "$OUT/style.png" style tovuer 100 28

@@ -1,4 +1,5 @@
-//! The microphone chain: filter → noise suppression (RNNoise) → gain →
+//! The microphone chain: filter → noise suppression (RNNoise, see
+//! [`crate::denoise`]) → gain →
 //! speech detector → Opus. In: mono 48 kHz in chunks of any length;
 //! out: finished 20 ms packets.
 
@@ -6,10 +7,9 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use nnnoiseless::DenoiseState;
-
 use crate::codec::{CodecError, DEFAULT_BITRATE, Encoder, MAX_PACKET};
 use crate::controls::Controls;
+use crate::denoise::Suppressor;
 use crate::dsp::{Agc, Biquad, rms, soft_limit};
 use crate::{FRAME, SAMPLE_RATE};
 
@@ -37,7 +37,7 @@ pub struct CaptureProcessor {
     ctl: Arc<Controls>,
     pending: Vec<f32>,
     high_pass: Biquad,
-    denoise: Box<DenoiseState<'static>>,
+    denoise: Suppressor,
     agc: Agc,
     encoder: Encoder,
     seq: u16,
@@ -53,7 +53,7 @@ impl CaptureProcessor {
             ctl,
             pending: Vec::with_capacity(FRAME * 4),
             high_pass: Biquad::high_pass(SAMPLE_RATE as f32, 90.0, 0.707),
-            denoise: DenoiseState::new(),
+            denoise: Suppressor::new(),
             agc: Agc::new(),
             encoder: Encoder::new(DEFAULT_BITRATE)?,
             seq: 0,
@@ -81,23 +81,10 @@ impl CaptureProcessor {
         self.ctl.captured.fetch_add(1, Ordering::Relaxed);
         self.high_pass.process_block(frame);
 
-        // RNNoise works on 10 ms frames at int16 scale and also gives a speech
-        // probability — the gate opens on that (keyboard clatter does not pass).
+        // RNNoise also gives a speech probability — the gate opens on that
+        // (keyboard clatter does not pass), whether suppression is on or not
         let denoise_on = self.ctl.denoise.load(Ordering::Relaxed);
-        let mut vad = 0.0f32;
-        let mut scaled = [0.0f32; DenoiseState::FRAME_SIZE];
-        let mut cleaned = [0.0f32; DenoiseState::FRAME_SIZE];
-        for half in frame.chunks_exact_mut(DenoiseState::FRAME_SIZE) {
-            for (dst, src) in scaled.iter_mut().zip(half.iter()) {
-                *dst = src * 32768.0;
-            }
-            vad = vad.max(self.denoise.process_frame(&mut cleaned, &scaled));
-            if denoise_on {
-                for (dst, src) in half.iter_mut().zip(cleaned.iter()) {
-                    *dst = src / 32768.0;
-                }
-            }
-        }
+        let vad = self.denoise.process(frame, denoise_on, self.ctl.denoise_strength());
 
         let raw_level = rms(frame);
         let voiced = vad >= self.ctl.vad_threshold() && raw_level > SILENCE_FLOOR;
@@ -186,7 +173,7 @@ impl CaptureProcessor {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::f32::consts::PI;
 

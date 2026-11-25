@@ -2,7 +2,7 @@
 
 use std::sync::atomic::Ordering;
 
-use tovuer_proto::{ChannelKind, ClientMsg, FileMeta};
+use tovuer_proto::{ChannelKind, ClientMsg, FileMeta, VideoSource};
 
 use super::overlay::Overlay;
 use super::{App, Effect, Tone};
@@ -31,19 +31,25 @@ pub const COMMANDS: &[CommandSpec] = &[
     cmd(&["v", "voice"], "[channel]", "join a voice channel; without a name — leave"),
     cmd(&["m"], "", "turn your microphone on/off"),
     cmd(&["d", "deafen"], "", "turn sound on/off (hear no one)"),
+    cmd(&["call"], "", "the call of your voice channel: everyone's camera and screen (Alt+C)"),
+    cmd(&["cam", "camera"], "[on|off]", "your camera in the voice channel (Alt+V)"),
+    cmd(&["screen", "share"], "[on|off]", "share your screen in the voice channel (Alt+S)"),
+    cmd(&["webcam"], "[name|default|test]", "pick a camera; test — a test picture"),
+    cmd(&["watch"], "[nick|off]", "watch someone's shared screen above the chat (Alt+W)"),
     cmd(&["mute"], "<nick>", "stop hearing someone (only for you)"),
     cmd(&["unmute"], "<nick>", "hear someone again"),
     cmd(&["vol"], "<nick> <0-200>", "someone's volume, in percent"),
     cmd(&["volume"], "<0-200>", "overall volume of others"),
     cmd(&["gain"], "<50-300>", "your microphone gain"),
-    cmd(&["denoise"], "[on|off]", "noise suppression"),
+    cmd(&["denoise"], "[off|soft|normal|strong]", "noise suppression and how hard it works"),
     cmd(&["agc"], "[on|off]", "automatic microphone level"),
-    cmd(&["devices", "dev"], "", "list microphones and speakers"),
+    cmd(&["devices", "dev"], "", "list microphones, speakers and cameras"),
     cmd(&["mic"], "[name|default]", "pick a microphone; without a name — audio diagnostics"),
     cmd(&["spk"], "[name|default]", "pick speakers"),
     cmd(&["theme"], "[name|next]", "change the color theme"),
     cmd(&["transparent"], "[on|off]", "transparent background"),
     cmd(&["previews"], "[on|off]", "picture thumbnails in the chat"),
+    cmd(&["animate"], "[on|off]", "GIFs and videos play in the feed"),
     cmd(&["sharp"], "[on|off]", "real pixels for pictures in the feed and the viewer (sixel/kitty)"),
     cmd(&["style"], "", "how your messages look: color, gradient, markup (F4)"),
     cmd(&["color", "colour"], "[name|#rrggbb|off]", "the color of your messages"),
@@ -61,7 +67,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     cmd(&["room", "server"], "", "about the room and your node"),
     cmd(&["reconnect"], "", "rejoin the room"),
     cmd(&["log", "sys"], "", "the system log"),
-    cmd(&["update", "upgrade"], "", "update the client from the room owner"),
+    cmd(&["update", "upgrade"], "", "install the newest tovuer from GitHub and restart"),
     cmd(&["install"], "", "install the tovuer terminal command"),
     cmd(&["version", "ver"], "", "client version"),
     cmd(&["q", "quit", "exit"], "", "quit"),
@@ -192,6 +198,43 @@ impl App {
             }
             "m" => self.toggle_mute(),
             "d" => self.toggle_deafen(),
+            "call" => self.toggle_call(),
+            "watch" => match arg.trim() {
+                "" => self.toggle_watch(),
+                "off" | "stop" => self.watch_stream(None),
+                nick => self.watch_stream(Some(nick.trim_start_matches('@').to_string())),
+            },
+            "cam" | "screen" => {
+                let source = if spec.names[0] == "cam" { VideoSource::Camera } else { VideoSource::Screen };
+                let Some(on) = switch(arg, self.sharing() == Some(source)) else {
+                    self.warn(format!("usage: /{} on|off", spec.names[0]));
+                    return;
+                };
+                match (on, self.sharing() == Some(source)) {
+                    (true, false) => self.set_video(Some(source)),
+                    (false, true) => self.set_video(None),
+                    _ => {}
+                }
+            }
+            "webcam" => {
+                if arg.is_empty() {
+                    self.run_command("/devices");
+                    return;
+                }
+                let value = if arg.eq_ignore_ascii_case("default") { String::new() } else { arg.to_string() };
+                let shown = match value.as_str() {
+                    "" => "the first one".to_string(),
+                    v if v.eq_ignore_ascii_case(crate::video::TEST_DEVICE) => "a test picture".to_string(),
+                    v => v.to_string(),
+                };
+                self.settings.camera = value;
+                self.save_settings();
+                if self.sharing() == Some(VideoSource::Camera) {
+                    self.set_video(None);
+                    self.set_video(Some(VideoSource::Camera));
+                }
+                self.ok(format!("camera: {shown}"));
+            }
             "mute" | "unmute" => {
                 let mute = spec.names[0] == "mute";
                 if arg.is_empty() {
@@ -233,10 +276,29 @@ impl App {
                     _ => self.warn(format!("usage: /{} <{lo}-{hi}>", spec.names[0])),
                 }
             }
-            "denoise" | "agc" | "transparent" | "previews" | "sharp" | "mouse" => {
+            "denoise" => {
+                let mode = match arg.trim().to_lowercase().as_str() {
+                    // without a word: on/off, keeping the strength
+                    "" => if self.settings.denoise { "off".to_string() } else { tovuer_voice::Strength::from_u8(self.settings.denoise_level).name().to_string() },
+                    other => other.to_string(),
+                };
+                if self.set_denoise_mode(&mode) {
+                    self.ok(format!("noise suppression: {}", self.denoise_mode()));
+                } else {
+                    self.warn("usage: /denoise off|soft|normal|strong");
+                }
+            }
+            "animate" => {
+                let Some(on) = switch(arg, self.settings.animate) else {
+                    self.warn("usage: /animate on|off");
+                    return;
+                };
+                self.set_animate(on);
+                self.ok(format!("moving previews: {}", on_off(on)));
+            }
+            "agc" | "transparent" | "previews" | "sharp" | "mouse" => {
                 let s = &mut self.settings;
                 let slot = match spec.names[0] {
-                    "denoise" => &mut s.denoise,
                     "agc" => &mut s.agc,
                     "transparent" => &mut s.transparent,
                     "previews" => &mut s.previews,
@@ -249,7 +311,6 @@ impl App {
                 };
                 *slot = value;
                 let label = match spec.names[0] {
-                    "denoise" => "noise suppression",
                     "agc" => "automatic microphone level",
                     "transparent" => "transparent background",
                     "previews" => "picture previews",
@@ -285,6 +346,17 @@ impl App {
                     }
                     Err(e) => self.note(Tone::Error, format!("could not list audio devices: {e}")),
                 }
+                let cameras = crate::video::cameras();
+                let chosen = self.settings.camera.to_lowercase();
+                self.note(Tone::Info, "cameras:");
+                if cameras.is_empty() {
+                    self.note(Tone::Info, "    none found");
+                }
+                for (i, c) in cameras.iter().enumerate() {
+                    let picked = if chosen.is_empty() { i == 0 } else { c.name.to_lowercase().contains(&chosen) };
+                    self.note(Tone::Info, format!("  {} {}", if picked { "✓" } else { " " }, c.name));
+                }
+                self.note(Tone::Info, "pick: /webcam <part of the name> · /webcam test — a test picture");
                 self.show_log();
             }
             "mic" | "spk" => {
@@ -396,7 +468,7 @@ impl App {
                     self.note(Tone::Info, format!("your node id: {}", id.fmt_short()));
                 }
                 if let Some(v) = &self.update_available {
-                    self.note(Tone::Info, format!("the room owner has client {v}, you have {} — /update", self.launch.version));
+                    self.note(Tone::Info, format!("tovuer {v} is on GitHub, you have {} — /update", self.launch.version));
                 }
                 self.show_log();
             }

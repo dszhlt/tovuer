@@ -30,6 +30,11 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 ratatui-image = { version = "11.1.0", default-features = false, features = ["crossterm"] }
 unicode-width = "0.2"
 unicode-segmentation = "1"
+# /update from GitHub releases: the same HTTPS stack iroh already builds
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "stream"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+webpki-roots = "1"
+sha2 = "0.10"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

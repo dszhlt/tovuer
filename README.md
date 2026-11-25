@@ -25,11 +25,37 @@ and Windows.
 **Voice**
 - Opus 48 kHz, about 4 KB/s per speaker.
 - RNNoise noise suppression: fans, room noise and keyboard clatter do not get
-  through; the microphone opens on speech, not on loudness.
+  through; the microphone opens on speech, not on loudness. Three strengths
+  (`F2` or `/denoise soft|normal|strong`): soft only turns the noise down
+  and keeps the voice natural, strong also takes away the hiss of a cheap
+  microphone.
 - Automatic microphone level, per-person volume, local mute.
 - An adaptive buffer: 40–60 ms on a good link, growing up to half a second
   over a poor relay and shrinking back; lost packets are concealed.
 - Deafen (Alt+D), "who is talking" indicators, a microphone test.
+
+**Video**
+- Cameras and screen sharing in voice channels, like Discord: `Alt+V` turns
+  your camera on, `Alt+S` shares your screen, `Alt+C` opens the call —
+  everyone in the channel as a tile, a green frame around whoever talks.
+  Pick a tile (`Shift+Tab`, `←`/`→`, `Enter`) or click it to make it big.
+- A shared screen is a live stream for the whole room: a `● LIVE` line shows
+  up above every text channel, and `Alt+W` (or a click on it) plays the
+  screen above the chat — no need to join the voice channel; write while
+  you watch. `Alt+F` (or a click) spreads it over the whole window, `Alt+W`
+  again goes to the next stream or stops.
+- A screen goes at 45 frames a second, up to 1440×900, a camera at 30;
+  when nothing on a screen moves, nothing is sent. The voice panel shows
+  the frame rate you are sending at.
+- Video is real pixels where the terminal has graphics (Sixel, Kitty,
+  iTerm2) and colored blocks elsewhere: a camera in half-blocks (two dots a
+  cell, true colors), a screen in sextants (six dots a cell, so big text
+  can be made out; `TOVUER_BLOCKS=half` if your terminal lacks them).
+- Video goes straight to the people watching the call or the stream, nobody
+  else; a slow link gets fewer frames rather than lag.
+- The camera is read by `ffmpeg` (Linux, Windows, macOS), the screen by
+  `grim` on Wayland desktops like Hyprland and Sway and by `ffmpeg` on X11,
+  Windows and macOS. No webcam? `/webcam test` sends a test picture.
 
 **Chat**
 - Replies, editing and deleting your messages, reactions, `@nick` mentions;
@@ -48,11 +74,12 @@ and Windows.
   cut by the edge of the window shows as blocks until it is wholly in view.
   `o` opens the original in your image viewer, full quality, whatever the
   terminal is.
-- Videos show a frame with a play mark and their length, in the feed and
-  in the file picker, the same way; `Enter` plays one in your system's
-  player. The frame comes from `ffmpeg` if it is installed (it may only
-  open plain video files: no playlists or links); without it a video is
-  an ordinary file.
+- GIFs (and animated WebP) play in the feed, and so do the first 12 seconds
+  of a video — silently, in a loop, in blocks or in real pixels; `Enter`
+  plays a video in full in your system's player. They stand still while
+  the terminal window is not focused, and `/animate off` stops them for
+  good. Videos need `ffmpeg` (it may only open plain video files: no
+  playlists or links); without it a video is an ordinary file.
 - Channels on the fly, each with its own topic and draft.
 
 **Interface**
@@ -67,6 +94,14 @@ and Windows.
 |---|---|
 | ![The command palette: go to a channel, join voice, create a channel, switch the theme](docs/screenshots/palette.png) | ![The settings window: theme, previews, sharp pictures, microphone and speakers, noise suppression](docs/screenshots/settings.png) |
 
+The call (`Alt+C`): a camera, a shared screen, and you without video:
+
+![A call in the Lounge voice channel: bob's camera, kate's shared screen, dana's tile with her initial](docs/screenshots/call.png)
+
+A stream (`Alt+W`): kate's screen above #general, watched without joining voice:
+
+![kate's shared screen live above the #general chat, the conversation below](docs/screenshots/stream.png)
+
 Your message style (`F4`) — a color or a gradient that keeps flowing, and
 markup for everything you write:
 
@@ -80,7 +115,8 @@ The screenshots are the real interface drawn from demo data —
 ## Quick start
 
 You need [Rust](https://rustup.rs) 1.91+ and the ALSA headers (`alsa-lib` on
-Arch, `libasound2-dev` on Debian/Ubuntu).
+Arch, `libasound2-dev` on Debian/Ubuntu). Optional: `ffmpeg` for cameras
+and moving video previews, `grim` for sharing the screen on Wayland.
 
 ```bash
 git clone https://github.com/dszhlt/tovuer
@@ -111,10 +147,24 @@ Or bake the room in, so friends only type a nick:
 ./run.sh friend our-place secret    # → ./tovuer-friend and ./tovuer-friend.exe
 ```
 
-To hand out new versions, use `./run.sh release our-place secret` instead: it
-also puts the builds into your release folder, and while you are online the
-members can update with `/update`. (Restart your own tovuer after a release so
-the others see the "new version" hint.)
+Or just send them to the [releases page](https://github.com/dszhlt/tovuer/releases):
+there is a ready build for Linux and Windows.
+
+## Updates
+
+`/update` (or `F5` on the login screen when the room speaks a newer protocol)
+takes the newest release from GitHub, checks the file against the SHA-256
+GitHub gives for it, puts it in place of the program and restarts straight
+back into the room. At start tovuer asks GitHub once whether a new version
+is out and says so (switch it off in `F2`: "Look for updates at start").
+A build with the room baked in keeps its room and password when it updates.
+
+Releases are made by GitHub Actions from a version tag — it builds Linux
+and Windows and publishes them together:
+
+```bash
+git tag v2.1.0 && git push origin v2.1.0
+```
 
 Anyone can put the program on their PATH with `tovuer --install` (Windows:
 `.\tovuer-friend.exe --install`) or `/install` inside the client, and then
@@ -161,6 +211,10 @@ The details are in [protocol.md](protocol.md).
 | `↑` on an empty line | edit your last message |
 | `Alt+M` | microphone (also `m` in the channel list) |
 | `Alt+D` | sound: hear no one and stay silent |
+| `Alt+C` | the call of your voice channel: cameras and screens |
+| `Alt+V` · `Alt+S` | your camera · share your screen |
+| `Alt+W` | watch a shared screen above the chat (again — the next one or stop) |
+| `Alt+F` | the watched screen over the whole window, `Esc` — back |
 | `Ctrl+O` | send a file (or drop a file into the terminal window) |
 | `F1` · `F2` · `F3` | help · settings · peer volumes |
 | `F4` | your message style: color, flowing gradient, bold / italic / strike / code |
@@ -171,6 +225,10 @@ In message mode (`Shift+Tab` from the input): `r` reply, `e` edit, `d` delete,
 `a` react, `Enter` open a picture, a video or a file, `o` open it in your system's app
 (a photo in full quality), `s` save, `y` copy the text. In the picture viewer:
 `←`/`→` flip, `o` open the original, `s` save.
+
+In the call (`Alt+C`): `Shift+Tab` picks a tile, `←`/`→` moves, `Enter` makes
+it big and back; a click on a tile does the same. The input stays: you can
+write to the open channel while watching.
 
 In the channel list (`Tab` from the input): `Enter` opens a channel or joins a
 voice one, `n` / `v` — new text / voice channel (or click the `+` next to
@@ -189,15 +247,18 @@ channel…", "Delete channel #…".
 | `/m`, `/d` | your microphone; sound as a whole |
 | `/mute <nick>`, `/unmute <nick>`, `/vol <nick> <0-200>` | mute / unmute / someone's volume — only for you |
 | `/volume <0-200>`, `/gain <50-300>` | overall volume; microphone gain |
-| `/denoise`, `/agc` | noise suppression and automatic level (`on`/`off`) |
+| `/denoise [off\|soft\|normal\|strong]`, `/agc` | noise suppression and its strength, automatic level |
 | `/devices`, `/mic [name]`, `/spk [name]` | devices; `/mic` without a name — audio diagnostics |
-| `/theme [name\|next]`, `/transparent`, `/previews`, `/sharp`, `/mouse` | looks (`/sharp` — real pixels for pictures) |
+| `/call`, `/cam [on\|off]`, `/screen [on\|off]` | the call; your camera; share your screen |
+| `/webcam [name\|default\|test]` | pick a camera (`test` — a test picture) |
+| `/watch [nick\|off]` | watch someone's shared screen above the chat |
+| `/theme [name\|next]`, `/transparent`, `/previews`, `/animate`, `/sharp`, `/mouse` | looks (`/animate` — GIFs and videos play, `/sharp` — real pixels for pictures) |
 | `/style`, `/color [name\|#rrggbb\|off]`, `/gradient [name\|#hex #hex…\|off]` | how your messages look (`/gradient sunset`, `/color #ff8800`) |
 | `/new [name]`, `/newvoice [name]`, `/topic <text>` | create a text / voice channel (without a name — asks), the topic |
 | `/delchannel [name]`, `/kick <nick>` | room owner only: delete a text or voice channel (without a name — the open one), remove someone |
 | `/me <action>`, `/shrug` | small things |
 | `/ping`, `/room`, `/reconnect`, `/log` | the room and diagnostics |
-| `/update`, `/install`, `/version`, `/q` | update from the owner, the `tovuer` terminal command, version, quit |
+| `/update`, `/install`, `/version`, `/q` | the newest tovuer from GitHub, the `tovuer` terminal command, version, quit |
 
 The full list with hints — `F1`, or just start typing `/`.
 
@@ -208,8 +269,7 @@ The full list with hints — `F1`, or just start typing `/`.
   `identity.key` — the key others know this install by.
 - `~/.local/share/tovuer/` (Windows: `%APPDATA%\tovuer\`): `rooms/` (each
   room's history and the peers you met), `files/` (shared files, by content
-  hash — you hand them on to others), `release/` (builds you hand out with
-  `/update`).
+  hash — you hand them on to others).
 - `~/.cache/tovuer/`: logs; `open/` — files you opened in another app with
   `o` (cleared at every start).
 
@@ -220,10 +280,10 @@ nick), `TOVUER_VERSION`.
 ## Project layout
 
 ```
-crates/proto    shared types: chat messages, channels, users, the voice frame
+crates/proto    shared types: chat messages, channels, users, the voice and video frames
 crates/voice    audio: Opus, RNNoise, automatic gain, jitter buffer, devices (cpal)
 crates/node     the peer: room keys, signed operation log, DHT lookup, iroh connections
-crates/client   the client: logic, interface (ratatui), the link to its own node
+crates/client   the client: logic, interface (ratatui), cameras and screens, the link to its own node
 ```
 
 ```bash
@@ -237,7 +297,7 @@ TOVUER_GRAPHICS=off tovuer                           # pictures as blocks (or fo
 TOVUER_ICONS=emoji tovuer                            # emoji icons even with a Nerd Font (or force nerd)
 ```
 
-Scenes for `snapshot`: `main`, `voice`, `select`, `login`, `palette`, `help`,
+Scenes for `snapshot`: `main`, `voice`, `call`, `stream`, `select`, `login`, `palette`, `help`,
 `settings`, `users`, `react`, `picker`, `viewer`, `typing`, `toast`.
 
 ## License

@@ -1,7 +1,7 @@
 //! The client's network task against real peers in the same process: real
 //! nodes over loopback QUIC, rooms found through an in-process list instead
-//! of the DHT. Chat, voice frames into the audio engine, files with previews,
-//! updates from the room owner.
+//! of the DHT. Chat, voice frames into the audio engine, video into the
+//! decoder, files with previews.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -41,12 +41,14 @@ struct Peer {
     net: NetHandle,
     events: mpsc::UnboundedReceiver<(u64, NetEvent)>,
     engine: Arc<Engine>,
+    /// Decoded video of others.
+    video: mpsc::UnboundedReceiver<TaskEvent>,
     paths: Paths,
     users: Vec<User>,
 }
 
 impl Peer {
-    fn spawn(dir: &TempDir, net: &LocalNet, seed: u8, release: Option<PathBuf>) -> Self {
+    fn spawn(dir: &TempDir, net: &LocalNet, seed: u8) -> Self {
         let engine = Arc::new(Engine::new(|_| {}));
         let (tx, events) = mpsc::unbounded_channel();
         let paths = Paths::at(&dir.0.join(format!("peer-{seed}")));
@@ -55,11 +57,11 @@ impl Peer {
             secret: SecretKey::from_bytes(&[seed; 32]),
             data_dir: paths.rooms_dir(),
             files_dir: paths.file_cache(),
-            release_dir: release,
             network: Network::Local(net.clone()),
         };
-        let net = net::spawn(tx, engine.clone(), setup);
-        Self { net, events, engine, paths, users: Vec::new() }
+        let (video_tx, video) = mpsc::unbounded_channel();
+        let net = net::spawn(tx, engine.clone(), tovuer::video::Decoder::spawn(video_tx), setup);
+        Self { net, events, engine, video, paths, users: Vec::new() }
     }
 
     async fn event(&mut self) -> NetEvent {
@@ -95,7 +97,7 @@ impl Peer {
     }
 
     async fn join(dir: &TempDir, net: &LocalNet, seed: u8, name: &str) -> Self {
-        let mut peer = Self::spawn(dir, net, seed, None);
+        let mut peer = Self::spawn(dir, net, seed);
         peer.connect("home", name, None);
         peer.welcomed().await;
         peer
@@ -186,13 +188,49 @@ async fn chat_and_voice_between_two_clients() {
 }
 
 #[tokio::test]
+async fn video_reaches_those_watching_the_call() {
+    use tovuer_proto::{VideoSource, video};
+    let (dir, rooms) = (TempDir::new("video"), LocalNet::new());
+    let mut dana = Peer::join(&dir, &rooms, 1, "dana").await;
+    let mut bob = Peer::join(&dir, &rooms, 2, "bob").await;
+    for peer in [&dana, &bob] {
+        peer.net.send(ClientMsg::VoiceJoin { channel: "Lounge".into() });
+    }
+    dana.net.send(ClientMsg::Video { source: Some(VideoSource::Camera), watching: true, stream: None });
+    bob.net.send(ClientMsg::Video { source: None, watching: true, stream: None });
+    let dana_id = bob.id_of("dana");
+    bob.server_msg(|m| matches!(m, ServerMsg::UserUpdate { user } if user.id == dana_id && user.video.is_some()).then_some(())).await;
+    dana.server_msg(|m| matches!(m, ServerMsg::UserUpdate { user } if user.name == "bob" && user.voice.is_some()).then_some(())).await;
+
+    let picture = image::RgbImage::from_fn(64, 48, |x, y| image::Rgb([(x * 4) as u8, (y * 5) as u8, 200]));
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 80).encode_image(&picture).unwrap();
+    let frame = bytes::Bytes::from(video::encode(VideoSource::Camera, 1, 64, 48, &jpeg));
+    let got = timeout(WAIT, async {
+        loop {
+            dana.net.video(frame.clone());
+            if let Ok(Some(TaskEvent::Video { from, frame })) = timeout(Duration::from_millis(100), bob.video.recv()).await {
+                return (from, frame);
+            }
+        }
+    })
+    .await
+    .expect("the frame never reached bob");
+    assert_eq!(got.0, Some(dana_id));
+    assert_eq!((got.1.source, got.1.image.width(), got.1.image.height()), (VideoSource::Camera, 64, 48));
+    let centre = got.1.image.get_pixel(32, 24);
+    assert!(centre[2] > 150, "the picture survives the trip: {centre:?}");
+    assert!(dana.video.try_recv().is_err(), "your own video does not come back");
+}
+
+#[tokio::test]
 async fn the_password_is_part_of_the_room() {
     let (dir, rooms) = (TempDir::new("password"), LocalNet::new());
-    let mut dana = Peer::spawn(&dir, &rooms, 1, None);
+    let mut dana = Peer::spawn(&dir, &rooms, 1);
     dana.connect("home", "dana", Some("sesame"));
     dana.welcomed().await;
 
-    let mut bob = Peer::spawn(&dir, &rooms, 2, None);
+    let mut bob = Peer::spawn(&dir, &rooms, 2);
     bob.connect("home", "bob", Some("wrong"));
     bob.welcomed().await;
     assert_eq!(bob.users.len(), 1, "a wrong password is simply another, empty room");
@@ -207,7 +245,7 @@ async fn the_password_is_part_of_the_room() {
 async fn a_taken_nick_is_rejected_and_another_works() {
     let (dir, rooms) = (TempDir::new("nick"), LocalNet::new());
     let _dana = Peer::join(&dir, &rooms, 1, "dana").await;
-    let mut other = Peer::spawn(&dir, &rooms, 2, None);
+    let mut other = Peer::spawn(&dir, &rooms, 2);
     other.connect("home", "DANA", None);
     let code = timeout(WAIT, async {
         loop {
@@ -292,43 +330,4 @@ async fn files_travel_between_peers_with_previews() {
     .await;
     assert!(error.unwrap().contains("too big"));
     let _ = dana.chat_msg().await;
-}
-
-#[tokio::test]
-async fn updates_come_from_the_owner_and_never_install_garbage() {
-    let (dir, rooms) = (TempDir::new("update"), LocalNet::new());
-    let release = dir.0.join("release");
-    std::fs::create_dir_all(&release).unwrap();
-    let mut owner = Peer::spawn(&dir, &rooms, 1, Some(release.clone()));
-    owner.connect("home", "dana", None);
-    owner.welcomed().await;
-    let bob = Peer::join(&dir, &rooms, 2, "bob").await;
-    let (tasks, mut task_rx) = mpsc::unbounded_channel();
-    let check = |current: &str| transfer::update(bob.net.node().unwrap(), current.to_string(), tasks.clone());
-    async fn done(rx: &mut mpsc::UnboundedReceiver<TaskEvent>) -> Result<Option<(PathBuf, String)>, String> {
-        task_event(rx, |e| match e {
-            TaskEvent::UpdateDone(result) => Some(result),
-            _ => None,
-        })
-        .await
-    }
-
-    // the owner has not released anything
-    check("1.0");
-    assert!(done(&mut task_rx).await.unwrap_err().contains("no build"));
-
-    // same version — nothing to download
-    std::fs::write(release.join("VERSION"), "1.0\n").unwrap();
-    std::fs::write(release.join(transfer::asset_name()), b"\x7fELF").unwrap();
-    check("1.0");
-    assert_eq!(done(&mut task_rx).await, Ok(None));
-
-    // a newer version, but what lies there is not a program — our file is left alone
-    std::fs::write(release.join("VERSION"), "2.0").unwrap();
-    std::fs::write(release.join(transfer::asset_name()), "<html>502 Bad Gateway</html>".repeat(20_000)).unwrap();
-    let me = std::env::current_exe().unwrap();
-    let before = std::fs::metadata(&me).unwrap().len();
-    check("1.0");
-    assert!(done(&mut task_rx).await.unwrap_err().contains("not a program"));
-    assert_eq!(std::fs::metadata(&me).unwrap().len(), before, "the executable is untouched");
 }

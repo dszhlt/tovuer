@@ -4703,7 +4703,7 @@ dependencies = [
 
 [[package]]
 name = "tovuer"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4716,19 +4716,23 @@ dependencies = [
  "libc",
  "ratatui",
  "ratatui-image",
+ "reqwest",
+ "rustls",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "tovuer-node",
  "tovuer-proto",
  "tovuer-voice",
  "unicode-segmentation",
  "unicode-width",
+ "webpki-roots",
 ]
 
 [[package]]
 name = "tovuer-node"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -4744,7 +4748,7 @@ dependencies = [
 
 [[package]]
 name = "tovuer-proto"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -4752,7 +4756,7 @@ dependencies = [
 
 [[package]]
 name = "tovuer-voice"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "cpal",
  "nnnoiseless",

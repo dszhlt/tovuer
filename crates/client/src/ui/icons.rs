@@ -26,6 +26,10 @@ pub enum Icon {
     Attachment,
     Picture,
     Video,
+    /// Someone's camera is on.
+    Camera,
+    /// Someone shares their screen.
+    Screen,
     Folder,
     File,
     Search,
@@ -36,7 +40,7 @@ pub enum Icon {
 }
 
 impl Icon {
-    pub const ALL: [Icon; 16] = [
+    pub const ALL: [Icon; 18] = [
         Icon::Voice,
         Icon::Muted,
         Icon::Deafened,
@@ -46,6 +50,8 @@ impl Icon {
         Icon::Attachment,
         Icon::Picture,
         Icon::Video,
+        Icon::Camera,
+        Icon::Screen,
         Icon::Folder,
         Icon::File,
         Icon::Search,
@@ -69,6 +75,8 @@ impl Icon {
             Icon::Attachment => ("📎", "\u{f4fb} "),  // oct-paperclip
             Icon::Picture => ("📷", "\u{f4e5} "),     // oct-image
             Icon::Video => ("🎬", "\u{f52c} "),       // oct-video
+            Icon::Camera => ("📹", "\u{f447} "),      // oct-device_camera_video
+            Icon::Screen => ("💻", "\u{f4a9} "),      // oct-device_desktop
             Icon::Folder => ("📁", "\u{f413} "),      // oct-file_directory
             Icon::File => ("📄", "\u{f4a5} "),        // oct-file
             Icon::Search => ("🔍", "\u{f422} "),      // oct-search

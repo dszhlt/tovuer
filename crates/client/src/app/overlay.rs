@@ -33,6 +33,9 @@ pub enum Overlay {
 /// An action to pick in the palette (Ctrl+K).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Cmd {
+    Call,
+    Watch(Option<String>),
+    Video(tovuer_proto::VideoSource),
     Channel(String),
     Voice(String),
     LeaveVoice,
@@ -139,6 +142,7 @@ pub enum Setting {
     Transparent,
     Members,
     Previews,
+    Animate,
     Sharp,
     MyStyle,
     Styles,
@@ -151,18 +155,21 @@ pub enum Setting {
     Volume,
     Sensitivity,
     Monitor,
+    Camera,
     Sounds,
     Bell,
     Notify,
     NotifyAll,
+    Updates,
 }
 
 impl Setting {
-    pub const ALL: [Setting; 20] = [
+    pub const ALL: [Setting; 23] = [
         Setting::Theme,
         Setting::Transparent,
         Setting::Members,
         Setting::Previews,
+        Setting::Animate,
         Setting::Sharp,
         Setting::MyStyle,
         Setting::Styles,
@@ -175,10 +182,12 @@ impl Setting {
         Setting::Volume,
         Setting::Sensitivity,
         Setting::Monitor,
+        Setting::Camera,
         Setting::Sounds,
         Setting::Bell,
         Setting::Notify,
         Setting::NotifyAll,
+        Setting::Updates,
     ];
 
     /// The section heading, if a section starts at this row.
@@ -186,6 +195,7 @@ impl Setting {
         match self {
             Setting::Theme => Some("LOOK"),
             Setting::Mic => Some("AUDIO"),
+            Setting::Camera => Some("VIDEO"),
             Setting::Sounds => Some("NOTIFICATIONS"),
             _ => None,
         }
@@ -197,6 +207,7 @@ impl Setting {
             Setting::Transparent => "Transparent background",
             Setting::Members => "Online panel",
             Setting::Previews => "Picture previews in chat",
+            Setting::Animate => "Moving previews",
             Setting::Sharp => "Sharp pictures",
             Setting::MyStyle => "Your message style",
             Setting::Styles => "Styles of others",
@@ -209,10 +220,12 @@ impl Setting {
             Setting::Volume => "Volume of others",
             Setting::Sensitivity => "Microphone sensitivity",
             Setting::Monitor => "Microphone test",
+            Setting::Camera => "Camera",
             Setting::Sounds => "Join and leave sounds",
             Setting::Bell => "Bell on mention",
             Setting::Notify => "Desktop notifications",
             Setting::NotifyAll => "Notify about every message",
+            Setting::Updates => "Look for updates at start",
         }
     }
 
@@ -222,21 +235,24 @@ impl Setting {
             Setting::Transparent => "do not paint the background: the terminal's own shows through",
             Setting::Members => "the member list on the right (always hidden in narrow windows)",
             Setting::Previews => "show thumbnails of shared pictures",
+            Setting::Animate => "GIFs and the first seconds of videos play in the feed, silently; off — still pictures",
             Setting::Sharp => "pictures in the feed and the viewer in real pixels (sixel/kitty) if the terminal can; o opens the original",
             Setting::MyStyle => "Enter — color, a flowing gradient, bold / italic / strike / code for all you write (F4)",
             Setting::Styles => "how colors and gradients others picked show for you: flowing, still, or plain text",
             Setting::Mouse => "wheel and clicks; selecting text then needs Shift",
             Setting::Mic | Setting::Spk => "← → pick a device; “system default” follows the OS settings",
-            Setting::Denoise => "removes room noise, fans and keyboard clatter",
+            Setting::Denoise => "← → soft — turns noise down, the voice stays natural · normal — takes fans and clatter away · strong — also hiss, the voice gets thinner",
             Setting::Agc => "a quiet voice is raised, a loud one is tamed",
             Setting::MicGain => "manual boost on top of the automatic level",
             Setting::Volume => "overall volume; per person — separately, F3",
             Setting::Sensitivity => "strict — only clear speech; sensitive — catches whispers too",
             Setting::Monitor => "hear yourself the way others do (headphones recommended)",
+            Setting::Camera => "← → pick a camera for Alt+V; “test picture” checks video without one",
             Setting::Sounds => "a chime when someone joins or leaves the voice channel",
             Setting::Bell => "the terminal bell when someone @mentions you",
             Setting::Notify => "a desktop notification while the window is not focused",
             Setting::NotifyAll => "otherwise — mentions only",
+            Setting::Updates => "asks GitHub once at start whether a new tovuer is out; /update installs it",
         }
     }
 }
@@ -247,6 +263,21 @@ pub struct SettingsView {
     /// System devices; `None` — the list is still being fetched.
     pub mics: Option<Vec<DeviceInfo>>,
     pub spks: Option<Vec<DeviceInfo>>,
+    pub cameras: Option<Vec<String>>,
+}
+
+/// The next camera in a circle: the first one (empty) → each by name → the test picture → …
+pub fn cycle_camera(current: &str, cameras: &[String], delta: isize) -> String {
+    let mut names: Vec<&str> = vec![""];
+    names.extend(cameras.iter().map(String::as_str));
+    names.push(crate::video::TEST_DEVICE);
+    let lower = current.to_lowercase();
+    let at = names
+        .iter()
+        .position(|n| *n == current)
+        .or_else(|| (!current.is_empty()).then(|| names.iter().position(|n| n.to_lowercase().contains(&lower))).flatten())
+        .unwrap_or(0);
+    names[(at as isize + delta).rem_euclid(names.len() as isize) as usize].to_string()
 }
 
 /// The next device in a circle: "system default" (empty) → first → … → "system default".
@@ -498,8 +529,17 @@ mod tests {
     }
 
     #[test]
+    fn cameras_cycle_through_the_test_picture() {
+        let cams = vec!["Integrated Camera".to_string(), "USB Webcam".to_string()];
+        assert_eq!(cycle_camera("", &cams, 1), "Integrated Camera");
+        assert_eq!(cycle_camera("usb", &cams, 1), "test");
+        assert_eq!(cycle_camera("test", &cams, 1), "");
+        assert_eq!(cycle_camera("", &[], -1), "test", "no camera: the test picture is still there");
+    }
+
+    #[test]
     fn settings_sections_cover_all_rows() {
-        assert_eq!(Setting::ALL.iter().filter(|s| s.section().is_some()).count(), 3);
+        assert_eq!(Setting::ALL.iter().filter(|s| s.section().is_some()).count(), 4);
         assert!(Setting::ALL[0].section().is_some(), "the first row opens a section");
         for s in Setting::ALL {
             assert!(!s.label().is_empty() && !s.help().is_empty());

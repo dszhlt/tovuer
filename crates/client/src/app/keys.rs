@@ -1,9 +1,9 @@
 //! Keyboard, mouse and pasting.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use tovuer_proto::{ChannelKind, ClientMsg};
+use tovuer_proto::{ChannelKind, ClientMsg, VideoSource};
 
-use super::overlay::{ConfirmAction, Overlay, Prompt, PromptAction, REACT_COLS, Setting, cycle_device};
+use super::overlay::{ConfirmAction, Overlay, Prompt, PromptAction, REACT_COLS, Setting, cycle_camera, cycle_device};
 use super::{App, Completion, Compose, Effect, Focus, LoginField, Screen, Suggestion, Tone, commands, emoji};
 use crate::ui::Hit;
 use crate::ui::theme::Theme;
@@ -35,6 +35,17 @@ impl App {
         }
         if self.overlay.is_some() {
             return self.overlay_key(key);
+        }
+        // a screen over the whole window: Esc brings the chat back; letters do not type blindly
+        if self.stream_full() {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('f') => self.watch_full = false,
+                _ if is_alt(&key) || is_ctrl(&key) || matches!(key.code, KeyCode::F(_)) => {
+                    self.global_key(&key);
+                }
+                _ => {}
+            }
+            return;
         }
         if self.global_key(&key) {
             return;
@@ -89,6 +100,11 @@ impl App {
             KeyCode::Char('l') if ctrl => self.overlay = Some(Overlay::Log { scroll: 0 }),
             KeyCode::Char('m') if alt => self.toggle_mute(),
             KeyCode::Char('d') if alt => self.toggle_deafen(),
+            KeyCode::Char('c') if alt => self.toggle_call(),
+            KeyCode::Char('w') if alt => self.toggle_watch(),
+            KeyCode::Char('f') if alt => self.toggle_stream_full(),
+            KeyCode::Char('v') if alt => self.toggle_video(VideoSource::Camera),
+            KeyCode::Char('s') if alt => self.toggle_video(VideoSource::Screen),
             KeyCode::Up if alt => self.cycle_channel(-1),
             KeyCode::Down if alt => self.cycle_channel(1),
             KeyCode::Char('p') if ctrl => self.cycle_channel(-1),
@@ -246,7 +262,9 @@ impl App {
                         "theme" => Theme::names().iter().map(|n| n.to_string()).collect(),
                         "v" | "voice" => self.channels.iter().filter(|c| !c.is_text()).map(|c| c.name.clone()).collect(),
                         "mute" | "unmute" | "vol" | "kick" => self.others().iter().map(|u| u.name.clone()).collect(),
-                        "denoise" | "agc" | "mouse" | "transparent" | "previews" | "sharp" => vec!["on".into(), "off".into()],
+                        "denoise" => ["off", "soft", "normal", "strong"].iter().map(|s| s.to_string()).collect(),
+                        "agc" | "mouse" | "transparent" | "previews" | "animate" | "sharp" => vec!["on".into(), "off".into()],
+                        "watch" => std::iter::once("off".to_string()).chain(self.live().iter().map(|u| u.name.clone())).collect(),
                         "color" => std::iter::once("off").chain(super::style::COLORS.iter().map(|c| c.0)).map(str::to_string).collect(),
                         "gradient" => std::iter::once("off").chain(super::style::GRADIENTS.iter().map(|g| g.0)).map(str::to_string).collect(),
                         _ => Vec::new(),
@@ -380,7 +398,36 @@ impl App {
 
     // ------------------------------------------------------------------ messages
 
+    /// Picking a tile in the call (the feed's place, Shift+Tab gets here).
+    fn tiles_key(&mut self, key: KeyEvent) {
+        let members: Vec<u32> = self.call_members().iter().map(|u| u.id).collect();
+        let last = members.len().saturating_sub(1);
+        let sel = self.call.sel.min(last);
+        match key.code {
+            KeyCode::Left | KeyCode::Up | KeyCode::Char('h') | KeyCode::Char('k') => self.call.sel = sel.saturating_sub(1),
+            KeyCode::Right | KeyCode::Down | KeyCode::Char('l') | KeyCode::Char('j') => self.call.sel = (sel + 1).min(last),
+            KeyCode::Home | KeyCode::Char('g') => self.call.sel = 0,
+            KeyCode::End | KeyCode::Char('G') => self.call.sel = last,
+            KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Char('f') => {
+                if let Some(id) = members.get(sel) {
+                    self.spotlight(*id);
+                }
+            }
+            KeyCode::Esc | KeyCode::Char('i') | KeyCode::Char('q') | KeyCode::Tab => {
+                if self.call.focus.is_some() && key.code == KeyCode::Esc {
+                    self.call.focus = None;
+                } else {
+                    self.set_focus(Focus::Input);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn messages_key(&mut self, key: KeyEvent) {
+        if self.call_open() {
+            return self.tiles_key(key);
+        }
         let selected = self.channel().and_then(|c| c.selected_msg()).cloned();
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => self.select_message(-1),
@@ -504,6 +551,7 @@ impl App {
                 let last = Setting::ALL.len() - 1;
                 let which = Setting::ALL[view.sel.min(last)];
                 let (mics, spks) = (view.mics.clone().unwrap_or_default(), view.spks.clone().unwrap_or_default());
+                let cameras = view.cameras.clone().unwrap_or_default();
                 match key.code {
                     KeyCode::Esc | KeyCode::Char('q') | KeyCode::F(2) => {
                         self.stop_monitor();
@@ -526,11 +574,11 @@ impl App {
                         true
                     }
                     KeyCode::Left | KeyCode::Char('h') => {
-                        self.change_setting(which, -1, &mics, &spks);
+                        self.change_setting(which, -1, &mics, &spks, &cameras);
                         true
                     }
                     KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter | KeyCode::Char(' ') => {
-                        self.change_setting(which, 1, &mics, &spks);
+                        self.change_setting(which, 1, &mics, &spks, &cameras);
                         true
                     }
                     _ => true,
@@ -795,6 +843,7 @@ impl App {
             Setting::Transparent => on(s.transparent),
             Setting::Members => on(s.members),
             Setting::Previews => on(s.previews),
+            Setting::Animate => on(s.animate),
             Setting::MyStyle => super::style::describe(&s.style),
             Setting::Styles => ["plain", "still", "flowing"][s.styles.min(2) as usize].to_string(),
             Setting::Sharp => match &self.graphics {
@@ -805,16 +854,22 @@ impl App {
             Setting::Mouse => on(s.mouse),
             Setting::Mic => device(&s.mic),
             Setting::Spk => device(&s.spk),
-            Setting::Denoise => on(s.denoise),
+            Setting::Denoise => self.denoise_mode().to_string(),
             Setting::Agc => on(s.agc),
             Setting::MicGain => format!("{}%", s.mic_gain),
             Setting::Volume => format!("{}%", s.volume),
             Setting::Sensitivity => ["strict", "normal", "sensitive"][s.sensitivity.min(2) as usize].to_string(),
             Setting::Monitor => on(self.engine.monitor()),
+            Setting::Camera => match s.camera.as_str() {
+                "" => "the first one".into(),
+                crate::video::TEST_DEVICE => "test picture".into(),
+                name => name.to_string(),
+            },
             Setting::Sounds => on(s.sounds),
             Setting::Bell => on(s.bell),
             Setting::Notify => on(s.notify),
             Setting::NotifyAll => on(s.notify_all),
+            Setting::Updates => on(s.check_updates),
         }
     }
 
@@ -825,6 +880,7 @@ impl App {
         delta: isize,
         mics: &[tovuer_voice::DeviceInfo],
         spks: &[tovuer_voice::DeviceInfo],
+        cameras: &[String],
     ) {
         let step = |value: u32, lo: u32, hi: u32| (value as i64 + delta as i64 * 10).clamp(lo as i64, hi as i64) as u32;
         match which {
@@ -843,6 +899,7 @@ impl App {
                 self.settings.previews = !self.settings.previews;
                 self.ui.invalidate();
             }
+            Setting::Animate => self.set_animate(!self.settings.animate),
             Setting::Sharp => self.settings.sharp = !self.settings.sharp,
             Setting::MyStyle => self.open_style(),
             Setting::Styles => {
@@ -861,7 +918,11 @@ impl App {
                 self.settings.spk = cycle_device(&self.settings.spk, spks, delta);
                 self.restart_engine();
             }
-            Setting::Denoise => self.settings.denoise = !self.settings.denoise,
+            Setting::Denoise => {
+                const MODES: [&str; 4] = ["off", "soft", "normal", "strong"];
+                let at = MODES.iter().position(|m| *m == self.denoise_mode()).unwrap_or(2);
+                self.set_denoise_mode(MODES[(at as isize + delta).rem_euclid(4) as usize]);
+            }
             Setting::Agc => self.settings.agc = !self.settings.agc,
             Setting::MicGain => self.settings.mic_gain = step(self.settings.mic_gain, 50, 300),
             Setting::Volume => self.settings.volume = step(self.settings.volume, 0, 200),
@@ -877,10 +938,19 @@ impl App {
                     self.stop_engine_now_public();
                 }
             }
+            Setting::Camera => {
+                self.settings.camera = cycle_camera(&self.settings.camera, cameras, delta);
+                // a camera that is on switches over
+                if self.sharing() == Some(tovuer_proto::VideoSource::Camera) {
+                    self.set_video(None);
+                    self.set_video(Some(tovuer_proto::VideoSource::Camera));
+                }
+            }
             Setting::Sounds => self.settings.sounds = !self.settings.sounds,
             Setting::Bell => self.settings.bell = !self.settings.bell,
             Setting::Notify => self.settings.notify = !self.settings.notify,
             Setting::NotifyAll => self.settings.notify_all = !self.settings.notify_all,
+            Setting::Updates => self.settings.check_updates = !self.settings.check_updates,
         }
         self.apply_audio_settings();
         self.save_settings();
@@ -974,6 +1044,14 @@ impl App {
                     }
                     Some(Hit::Input) => self.set_focus(Focus::Input),
                     Some(Hit::NewChannel(kind)) => self.prompt_new_channel(kind),
+                    Some(Hit::Live) => self.toggle_watch(),
+                    Some(Hit::Stream) => self.toggle_stream_full(),
+                    Some(Hit::Tile(id)) => {
+                        if let Some(at) = self.call_members().iter().position(|u| u.id == id) {
+                            self.call.sel = at;
+                        }
+                        self.spotlight(id);
+                    }
                     None => {}
                 }
                 self.dirty = true;

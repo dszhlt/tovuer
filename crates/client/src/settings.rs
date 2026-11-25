@@ -18,6 +18,10 @@ pub struct Settings {
     /// Part of the microphone / speakers name; empty — system default.
     pub mic: String,
     pub spk: String,
+    /// Camera: part of its name; empty — the first one, "test" — a test picture.
+    pub camera: String,
+    /// Screen to share: part of its name (a Wayland output, a macOS screen); empty — the current one.
+    pub screen: String,
     /// Who only we do not hear.
     pub muted: Vec<String>,
     /// Volume of particular people, in percent.
@@ -28,6 +32,8 @@ pub struct Settings {
     pub room: String,
     pub password: String,
     pub denoise: bool,
+    /// How hard noise suppression works: 0 soft, 1 normal, 2 strong.
+    pub denoise_level: u8,
     pub agc: bool,
     /// Manual microphone gain and overall volume, in percent.
     pub mic_gain: u32,
@@ -44,6 +50,10 @@ pub struct Settings {
     pub notify_all: bool,
     /// Picture thumbnails right in the chat.
     pub previews: bool,
+    /// GIFs and videos play in the feed.
+    pub animate: bool,
+    /// Ask GitHub for a newer release at start.
+    pub check_updates: bool,
     /// The picture viewer uses the terminal's own graphics (Sixel, Kitty), if it has them.
     pub sharp: bool,
     /// How your messages look to everyone.
@@ -62,12 +72,15 @@ impl Default for Settings {
             transparent: false,
             mic: String::new(),
             spk: String::new(),
+            camera: String::new(),
+            screen: String::new(),
             muted: Vec::new(),
             volumes: BTreeMap::new(),
             nick: String::new(),
             room: String::new(),
             password: String::new(),
             denoise: true,
+            denoise_level: 1,
             agc: true,
             mic_gain: 100,
             volume: 100,
@@ -77,6 +90,8 @@ impl Default for Settings {
             notify: true,
             notify_all: false,
             previews: true,
+            animate: true,
+            check_updates: true,
             sharp: true,
             // a gradient, once picked, flows unless switched off
             style: tovuer_proto::TextStyle { flow: true, ..Default::default() },
@@ -144,10 +159,6 @@ impl Paths {
         self.data.join("rooms")
     }
 
-    /// Client builds handed out to the room by `/update` (`./run.sh release` puts them here).
-    pub fn release_dir(&self) -> PathBuf {
-        self.data.join("release")
-    }
 
     pub fn settings_file(&self) -> PathBuf {
         self.config.join("settings.json")

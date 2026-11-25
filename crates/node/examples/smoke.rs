@@ -19,10 +19,9 @@ async fn peer(room: &str, nick: &str, dir: &std::path::Path) -> anyhow::Result<(
         secret: SecretKey::from_bytes(&random::<32>()),
         data_dir: dir.join(nick).join("rooms"),
         files_dir: dir.join(nick).join("files"),
-        release_dir: None,
         network: Network::Internet,
     };
-    Ok((Node::start(cfg, tx, Arc::new(|_, _, _, _| {})).await?, rx))
+    Ok((Node::start(cfg, tx, Arc::new(|_, _, _, _| {}), Arc::new(|_, _| {})).await?, rx))
 }
 
 async fn wait(rx: &mut mpsc::UnboundedReceiver<Event>, what: &str, limit: Duration, want: impl Fn(&ServerMsg) -> bool) -> anyhow::Result<ServerMsg> {

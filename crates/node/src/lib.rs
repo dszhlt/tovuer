@@ -15,7 +15,7 @@ pub mod wire;
 
 pub use discovery::LocalNet;
 pub use iroh::SecretKey;
-pub use node::{Config, Event, MAX_FILE, Network, Node, VoiceSink};
+pub use node::{Config, Event, MAX_FILE, Network, Node, VideoSink, VoiceSink};
 pub use room::normalize_room;
 
 /// Load this install's identity from `path`, creating it on first run.

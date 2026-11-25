@@ -1,7 +1,7 @@
 //! The peer. Every running client is one: it keeps a copy of the room,
 //! connects directly to every other member it can find, exchanges missing
-//! operations with them, sends its own voice straight to the people in the
-//! same voice channel and serves files it has.
+//! operations with them, sends its own voice and video straight to the
+//! people in the same voice channel and serves files it has.
 //!
 //! For the local client it looks like the old server did: it takes
 //! [`ClientMsg`]s and answers with [`ServerMsg`]s.
@@ -16,9 +16,9 @@ use bytes::Bytes;
 use iroh::endpoint::{Connection, Incoming, RecvStream, SendStream, presets};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, SecretKey};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::time::timeout;
-use tovuer_proto::{self as proto, ChannelKind, ClientMsg, ErrorCode, FileMeta, ReplyRef, ServerMsg, User};
+use tovuer_proto::{self as proto, ChannelKind, ClientMsg, ErrorCode, FileMeta, ReplyRef, ServerMsg, User, VideoSource};
 
 use crate::discovery::{Discovery, LocalNet, RoomDht};
 use crate::log::{OpLog, Offer};
@@ -26,12 +26,10 @@ use crate::ops::{Body, Key, Op};
 use crate::room::{RoomKeys, normalize_room};
 use crate::state::{Effect, MAX_CHANNELS, Room, clean_emoji};
 use crate::util::{hex, random, unhex};
-use crate::wire::{ALPN, Frame, OPS_BATCH, PeerState, TAG_CONTROL, TAG_FILE, TAG_UPDATE, read_frame, write_frame};
+use crate::wire::{ALPN, Frame, OPS_BATCH, PeerState, TAG_CONTROL, TAG_FILE, TAG_VIDEO, read_frame, write_frame};
 
 /// Biggest file a member can share.
 pub const MAX_FILE: u64 = 50 << 20;
-/// Biggest client binary handed out by `/update`.
-const MAX_UPDATE: u64 = 300 << 20;
 /// Our own user id in events for the local client; peers get 2, 3, …
 const ME: u32 = 1;
 /// How long joining waits for someone to answer before the room opens anyway.
@@ -53,6 +51,13 @@ const RESYNC_EVERY: Duration = Duration::from_secs(60);
 const MAX_KNOWN_PEERS: usize = 64;
 /// Remote clocks further ahead than this do not drag ours along.
 const MAX_CLOCK_SKEW_MS: u64 = 5 * 60 * 1000;
+/// Video frames on their way to one peer at once: more wait, and only the
+/// newest of them goes — a slow link drops frames instead of lagging. Four
+/// keep 45 frames a second going over a link with a 90 ms round trip.
+const VIDEO_IN_FLIGHT: usize = 4;
+/// A frame not delivered by then is given up.
+const VIDEO_SEND_TIMEOUT: Duration = Duration::from_secs(3);
+const VIDEO_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How the node reaches other peers.
 #[derive(Clone, Debug)]
@@ -75,8 +80,6 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// Shared files, named by content hash.
     pub files_dir: PathBuf,
-    /// Client builds this peer hands out for `/update` (`VERSION` + binaries).
-    pub release_dir: Option<PathBuf>,
     pub network: Network,
 }
 
@@ -91,6 +94,8 @@ pub enum Event {
 
 /// Where incoming voice goes: `(sender id, sequence number, last frame of a phrase, Opus packet)`.
 pub type VoiceSink = Arc<dyn Fn(u32, u16, bool, &[u8]) + Send + Sync>;
+/// Where incoming video goes: `(sender id, a checked [`proto::video`] frame)`.
+pub type VideoSink = Arc<dyn Fn(u32, Bytes) + Send + Sync>;
 
 #[derive(Clone)]
 pub struct Node {
@@ -106,9 +111,9 @@ struct Inner {
     internet: bool,
     room_dir: PathBuf,
     files_dir: PathBuf,
-    release_dir: Option<PathBuf>,
     events: mpsc::UnboundedSender<Event>,
     voice_sink: VoiceSink,
+    video_sink: VideoSink,
     core: Mutex<Core>,
     stop: watch::Sender<bool>,
 }
@@ -117,6 +122,8 @@ struct Peer {
     id: u32,
     conn: Connection,
     tx: mpsc::UnboundedSender<Frame>,
+    /// The newest of our video frames for this peer.
+    video: watch::Sender<Option<Bytes>>,
     state: PeerState,
     addr: EndpointAddr,
     since: Instant,
@@ -174,6 +181,7 @@ impl Core {
                 muted: self.me.muted || self.me.deafened,
                 deafened: self.me.deafened,
                 admin,
+                video: self.me.video.filter(|_| self.me.voice.is_some()),
             });
         }
         let peer = self.peers.get(key)?;
@@ -184,6 +192,7 @@ impl Core {
             muted: peer.state.muted || peer.state.deafened,
             deafened: peer.state.deafened,
             admin,
+            video: peer.state.video.filter(|_| peer.state.voice.is_some()),
         })
     }
 
@@ -234,21 +243,13 @@ fn key_of(id: &EndpointId) -> Key {
 fn clean_state(mut state: PeerState) -> PeerState {
     state.nick = proto::clean_name(&state.nick).unwrap_or_else(|| "anon".into());
     state.voice = state.voice.and_then(|v| proto::clean_channel(&v));
+    if state.voice.is_none() {
+        state.video = None;
+        state.watching = false;
+    }
+    state.stream = state.stream.and_then(|n| proto::clean_name(&n));
     state.version = proto::one_line(&state.version, 40);
-    state.release = state.release.map(|r| proto::one_line(&r, 64)).filter(|r| !r.is_empty());
     state
-}
-
-fn read_release(dir: &Path) -> Option<String> {
-    let version = std::fs::read_to_string(dir.join("VERSION")).ok()?;
-    let version = version.trim();
-    (!version.is_empty() && version.len() <= 64).then(|| version.to_string())
-}
-
-/// `tovuer-linux-amd64`, `tovuer-windows-amd64.exe` — nothing that could
-/// point outside the release folder.
-fn valid_asset(name: &str) -> bool {
-    name.starts_with("tovuer-") && name.len() <= 64 && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) && !name.contains("..")
 }
 
 fn valid_file_id(id: &str) -> bool {
@@ -281,7 +282,7 @@ impl Node {
     /// Open the room: load what we stored, start listening and go looking for
     /// the other members. Returns at once; [`Event`]s follow, starting with
     /// `Welcome` once the room is joined.
-    pub async fn start(cfg: Config, events: mpsc::UnboundedSender<Event>, voice_sink: VoiceSink) -> anyhow::Result<Node> {
+    pub async fn start(cfg: Config, events: mpsc::UnboundedSender<Event>, voice_sink: VoiceSink, video_sink: VideoSink) -> anyhow::Result<Node> {
         let name = normalize_room(&cfg.room).context("the room name needs letters or digits")?;
         let nick = proto::clean_name(&cfg.nick).context("the nick is empty")?;
         let keys = {
@@ -325,8 +326,7 @@ impl Node {
                 (endpoint, Discovery::Local(net.clone()), false)
             }
         };
-        let release = cfg.release_dir.as_deref().and_then(read_release);
-        let me_state = PeerState { nick, version: cfg.version.clone(), release, ..PeerState::default() };
+        let me_state = PeerState { nick, version: cfg.version.clone(), ..PeerState::default() };
         let (stop, _) = watch::channel(false);
         let inner = Arc::new(Inner {
             me: key_of(&endpoint.id()),
@@ -337,9 +337,9 @@ impl Node {
             internet,
             room_dir: room_dir.clone(),
             files_dir: cfg.files_dir,
-            release_dir: cfg.release_dir,
             events,
             voice_sink,
+            video_sink,
             core: Mutex::new(Core {
                 room,
                 log,
@@ -390,6 +390,21 @@ impl Node {
         }
     }
 
+    /// A frame from our camera or screen ([`proto::video`] format): to
+    /// everyone in our voice channel who is watching the call, and — a
+    /// screen — to whoever watches it from a text channel.
+    pub fn video(&self, frame: Bytes) {
+        let core = self.inner.lock();
+        let (Some(room), Some(source)) = (core.me.voice.as_ref(), core.me.video) else { return };
+        for peer in core.peers.values() {
+            let in_call = peer.state.voice.as_ref() == Some(room) && peer.state.watching;
+            let watches = source == VideoSource::Screen && peer.state.stream.as_deref().is_some_and(|n| same_nick(n, &core.me.nick));
+            if in_call || watches {
+                peer.video.send_replace(Some(frame.clone()));
+            }
+        }
+    }
+
     /// Where a shared file lives on disk once we have it.
     pub fn file_path(&self, id: &str) -> Option<PathBuf> {
         valid_file_id(id).then(|| self.inner.files_dir.join(id))
@@ -410,16 +425,6 @@ impl Node {
     /// Get a shared file from whoever has it; returns its path in the file store.
     pub async fn fetch_file(&self, file: &FileMeta, progress: impl FnMut(u64, u64) + Send) -> Result<PathBuf, String> {
         self.inner.fetch_file(file, progress).await
-    }
-
-    /// Ask the room owner for their client release. `Ok(None)` — we already run it.
-    pub async fn fetch_update(
-        &self,
-        asset: &str,
-        current: &str,
-        progress: impl FnMut(u64, u64) + Send,
-    ) -> Result<Option<(String, Vec<u8>)>, String> {
-        self.inner.fetch_update(asset, current, progress).await
     }
 
     /// Leave the room and close every connection.
@@ -555,10 +560,6 @@ impl Inner {
         }
         core.welcomed = true;
         let owner = core.room.owner();
-        let client_version = owner
-            .filter(|o| *o != self.me)
-            .and_then(|o| core.peers.get(&o))
-            .and_then(|p| p.state.release.clone());
         let motd = match (core.peers.is_empty(), core.created_room) {
             (true, true) => Some(format!(
                 "Room “{}” created. Friends join by typing the same room name and password.",
@@ -577,7 +578,6 @@ impl Inner {
             channels: core.room.channels(),
             users: core.users(&self.me),
             max_file: MAX_FILE,
-            client_version,
             motd,
         };
         self.emit(&core, [welcome]);
@@ -768,6 +768,7 @@ impl Inner {
     fn register(self: &Arc<Self>, conn: Connection, send: SendStream, recv: RecvStream, state: PeerState, addr: EndpointAddr, dialed_by_me: bool) {
         let key = key_of(&conn.remote_id());
         let (tx, rx) = mpsc::unbounded_channel();
+        let (video, video_rx) = watch::channel(None);
         let known = {
             let mut core = self.lock();
             if core.stopped || core.room.is_banned(&key) {
@@ -796,7 +797,7 @@ impl Inner {
             if !others.is_empty() {
                 let _ = tx.send(Frame::Peers { addrs: others });
             }
-            core.peers.insert(key, Peer { id, conn: conn.clone(), tx, state, addr: addr.clone(), since: Instant::now() });
+            core.peers.insert(key, Peer { id, conn: conn.clone(), tx, video, state, addr: addr.clone(), since: Instant::now() });
             core.known.insert(key, (addr, proto::now_ms()));
             if let Some(user) = core.user(&key, &self.me) {
                 let event = if replaced { ServerMsg::UserUpdate { user } } else { ServerMsg::UserJoin { user } };
@@ -810,6 +811,8 @@ impl Inner {
         tokio::spawn(writer(send, rx));
         tokio::spawn(self.clone().reader(key, conn.clone(), recv));
         tokio::spawn(self.clone().datagrams(key, conn.clone()));
+        tokio::spawn(video_writer(conn.clone(), video_rx));
+        tokio::spawn(self.clone().video_frames(key, conn.clone()));
         tokio::spawn(self.clone().requests(conn));
     }
 
@@ -845,6 +848,35 @@ impl Inner {
             if let (Some(id), Some(frame)) = (sender, proto::voice::parse(&data)) {
                 (self.voice_sink)(id, frame.seq, frame.is_end(), frame.payload);
             }
+        }
+    }
+
+    /// Video from a peer: a stream per frame, taken only while they are in
+    /// our voice channel with video on and we are watching.
+    async fn video_frames(self: Arc<Self>, key: Key, conn: Connection) {
+        while let Ok(mut recv) = conn.accept_uni().await {
+            // (their id, only a screen is wanted from them)
+            let sender = {
+                let core = self.lock();
+                core.peers.get(&key).and_then(|peer| {
+                    let same = core.me.voice.is_some() && core.me.voice == peer.state.voice;
+                    let in_call = same && core.me.watching && peer.state.video.is_some();
+                    let watched = peer.state.video == Some(VideoSource::Screen) && core.me.stream.as_deref().is_some_and(|n| same_nick(n, &peer.state.nick));
+                    (in_call || watched).then_some((peer.id, !in_call))
+                })
+            };
+            let Some((id, screen_only)) = sender else {
+                let _ = recv.stop(0u32.into());
+                continue;
+            };
+            let sink = self.video_sink.clone();
+            tokio::spawn(async move {
+                let Ok(Ok(data)) = timeout(VIDEO_READ_TIMEOUT, recv.read_to_end(1 + proto::video::MAX_FRAME)).await else { return };
+                let frame = data.get(1..).and_then(proto::video::parse);
+                if data.first() == Some(&TAG_VIDEO) && frame.is_some_and(|f| !screen_only || f.source == VideoSource::Screen) {
+                    sink(id, Bytes::from(data).slice(1..));
+                }
+            });
         }
     }
 
@@ -951,7 +983,7 @@ impl Inner {
             if let Some(voice) = core.me.voice.clone()
                 && !core.room.channel(&voice, ChannelKind::Voice)
             {
-                self.set_presence(&mut core, |s| s.voice = None);
+                self.set_presence(&mut core, leave_voice);
             }
             if !forward.is_empty() {
                 core.broadcast(&Frame::Ops { ops: forward }, Some(&from));
@@ -1094,7 +1126,7 @@ impl Inner {
 
             ClientMsg::VoiceLeave => {
                 core.broadcast(&Frame::Speaking { on: false }, None);
-                self.set_presence(&mut core, |s| s.voice = None);
+                self.set_presence(&mut core, leave_voice);
             }
 
             ClientMsg::VoiceState { muted, deafened } => {
@@ -1108,6 +1140,16 @@ impl Inner {
                 if core.me.voice.is_some() {
                     core.broadcast(&Frame::Speaking { on }, None);
                 }
+            }
+
+            ClientMsg::Video { source, watching, stream } => {
+                let in_voice = core.me.voice.is_some();
+                let stream = stream.and_then(|n| proto::clean_name(&n));
+                self.set_presence(&mut core, |s| {
+                    s.video = source.filter(|_| in_voice);
+                    s.watching = watching && in_voice;
+                    s.stream = stream;
+                });
             }
 
             ClientMsg::ChannelCreate { name, kind } => {
@@ -1137,7 +1179,7 @@ impl Inner {
                 }
                 effect = self.create_op(&mut core, Body::ChannelDelete { name });
                 if effect.is_ok() && core.me.voice.as_ref().is_some_and(|v| !core.room.channel(v, ChannelKind::Voice)) {
-                    self.set_presence(&mut core, |s| s.voice = None);
+                    self.set_presence(&mut core, leave_voice);
                 }
             }
 
@@ -1342,65 +1384,14 @@ impl Inner {
         }
     }
 
-    async fn fetch_update(
-        self: &Arc<Self>,
-        asset: &str,
-        current: &str,
-        mut progress: impl FnMut(u64, u64) + Send,
-    ) -> Result<Option<(String, Vec<u8>)>, String> {
-        let conn = {
-            let core = self.lock();
-            match core.room.owner() {
-                None => return Err("this room has no owner yet".into()),
-                Some(owner) if owner == self.me => return Err("you own this room — your build is the release".into()),
-                Some(owner) => match core.peers.get(&owner) {
-                    Some(peer) => peer.conn.clone(),
-                    None => return Err("the room owner is offline — nobody to update from".into()),
-                },
-            }
-        };
-        let net = |e: &dyn std::fmt::Display| format!("network: {e}");
-        let (mut send, mut recv) = conn.open_bi().await.map_err(|e| net(&e))?;
-        send.write_all(&[TAG_UPDATE]).await.map_err(|e| net(&e))?;
-        write_frame(&mut send, &Frame::UpdateReq { asset: asset.to_string() }).await.map_err(|e| net(&e))?;
-        let _ = send.finish();
-        let (size, version) = match read_frame(&mut recv).await.map_err(|e| net(&e))? {
-            Some(Frame::Blob { size, version: Some(version) }) if size <= MAX_UPDATE => (size, version),
-            _ => return Err(format!("the owner has no build for your system ({asset})")),
-        };
-        if version == current {
-            let _ = recv.stop(0u32.into());
-            return Ok(None);
-        }
-        let mut data = Vec::with_capacity(size as usize);
-        let mut buf = vec![0u8; 64 * 1024];
-        let mut last = Instant::now();
-        while (data.len() as u64) < size {
-            match recv.read(&mut buf).await.map_err(|e| net(&e))? {
-                Some(n) => data.extend_from_slice(&buf[..n]),
-                None => return Err("the download stopped halfway".into()),
-            }
-            if last.elapsed() > Duration::from_millis(100) {
-                last = Instant::now();
-                progress(data.len() as u64, size);
-            }
-        }
-        Ok(Some((version, data)))
-    }
-
-    /// Answer a file or update request from a peer.
+    /// Answer a file request from a peer (anything else gets `missing`).
     async fn serve(&self, mut send: SendStream, mut recv: RecvStream) -> anyhow::Result<()> {
         let mut tag = [0u8; 1];
         recv.read_exact(&mut tag).await?;
         let frame = timeout(HELLO_TIMEOUT, read_frame(&mut recv)).await??;
-        let (path, version) = match (tag[0], frame) {
-            (TAG_FILE, Some(Frame::FileReq { id })) if valid_file_id(&id) => (Some(self.files_dir.join(id)), None),
-            (TAG_UPDATE, Some(Frame::UpdateReq { asset })) if valid_asset(&asset) => {
-                let dir = self.release_dir.clone();
-                let version = dir.as_deref().and_then(read_release);
-                (dir.map(|d| d.join(asset)).filter(|_| version.is_some()), version)
-            }
-            _ => (None, None),
+        let path = match (tag[0], frame) {
+            (TAG_FILE, Some(Frame::FileReq { id })) if valid_file_id(&id) => Some(self.files_dir.join(id)),
+            _ => None,
         };
         let file = match path {
             Some(path) => tokio::fs::File::open(path).await.ok(),
@@ -1412,7 +1403,7 @@ impl Inner {
             return Ok(());
         };
         let size = file.metadata().await?.len();
-        write_frame(&mut send, &Frame::Blob { size, version }).await?;
+        write_frame(&mut send, &Frame::Blob { size }).await?;
         let mut buf = vec![0u8; 64 * 1024];
         loop {
             let n = file.read(&mut buf).await?;
@@ -1425,6 +1416,42 @@ impl Inner {
         // let the bytes leave before the stream is dropped
         let _ = timeout(Duration::from_secs(30), send.stopped()).await;
         Ok(())
+    }
+}
+
+/// Nicks are told apart without case.
+fn same_nick(a: &str, b: &str) -> bool {
+    a.to_lowercase() == b.to_lowercase()
+}
+
+/// Out of the voice channel: no video either.
+fn leave_voice(state: &mut PeerState) {
+    state.voice = None;
+    state.video = None;
+    state.watching = false;
+}
+
+/// Our video to one peer, a stream per frame: the newest frame each time a
+/// lane frees up. Ends when the peer is gone (its sender is dropped).
+async fn video_writer(conn: Connection, mut frames: watch::Receiver<Option<Bytes>>) {
+    let lanes = Arc::new(Semaphore::new(VIDEO_IN_FLIGHT));
+    while frames.changed().await.is_ok() {
+        let Ok(lane) = lanes.clone().acquire_owned().await else { return };
+        // frames that came while waiting for the lane are skipped: take the newest
+        let Some(frame) = frames.borrow_and_update().clone() else { continue };
+        let conn = conn.clone();
+        tokio::spawn(async move {
+            let _lane = lane;
+            let send = async {
+                let mut send = conn.open_uni().await.ok()?;
+                send.write_all(&[TAG_VIDEO]).await.ok()?;
+                send.write_all(&frame).await.ok()?;
+                send.finish().ok()?;
+                // the lane is free once the peer has it all
+                send.stopped().await.ok()
+            };
+            let _ = timeout(VIDEO_SEND_TIMEOUT, send).await;
+        });
     }
 }
 

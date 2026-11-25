@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use image::DynamicImage;
-use ratatui_image::picker::{Picker as Graphics, ProtocolType};
+pub use ratatui_image::picker::Picker as Graphics;
+use ratatui_image::picker::ProtocolType;
 use ratatui_image::protocol::Protocol;
 use tokio::sync::mpsc;
 use tovuer_node::Node;
@@ -40,7 +41,7 @@ pub enum TaskEvent {
     /// The picture encoded for the terminal's own graphics, for a viewer of `area` cells.
     Sharp { file_id: String, area: (u16, u16), result: Result<Arc<Sharp>, String> },
     /// A feed thumbnail encoded for the terminal's own graphics, `cells` in size.
-    SharpThumb { file_id: String, cells: (u16, u16), result: Result<Arc<Sharp>, String> },
+    SharpThumb { file_id: String, cells: (u16, u16), result: Result<crate::motion::Pixels, String> },
     /// A file handed to the system's own app (an image viewer, a PDF reader…).
     Opened { name: String, result: Result<(), String> },
     /// Preview of the picture under the file picker's cursor.
@@ -49,12 +50,22 @@ pub enum TaskEvent {
     UpdateProgress { got: u64, total: u64 },
     /// `Ok(None)` — already the latest; `Ok(Some((exe, version)))` — replaced, time to restart.
     UpdateDone(Result<Option<(PathBuf, String)>, String>),
+    /// A newer release is on GitHub (found at start).
+    UpdateFound(String),
     Voice(Result<StreamInfo, String>),
     Devices(Result<(Vec<DeviceInfo>, Vec<DeviceInfo>), String>),
+    /// The names of the cameras, for the settings window.
+    Cameras(Vec<String>),
+    /// A video frame of someone in our voice channel; `None` — our own.
+    Video { from: Option<u32>, frame: Arc<crate::video::VideoFrame> },
+    /// Our camera or screen stopped by itself (no device, no ffmpeg…).
+    VideoEnded { source: tovuer_proto::VideoSource, error: Option<String> },
+    /// A video frame encoded for the terminal's own graphics, for a tile of `cells`.
+    SharpVideo { user: u32, seq: u32, cells: (u16, u16), result: Result<Arc<Sharp>, String> },
 }
 
 /// Backdrop behind transparent parts of a picture.
-const BACKDROP: [u32; 3] = [24, 24, 28];
+pub(crate) const BACKDROP: [u32; 3] = [24, 24, 28];
 
 /// A picture in memory (RGB, transparency already blended onto a dark backdrop).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +88,8 @@ pub struct Thumb {
     pub px: Vec<[u8; 3]>,
     /// A frame of a video this long, in seconds (if known).
     pub duration: Option<u32>,
+    /// A GIF or a video: its frames at this size, to play in the feed.
+    pub anim: Option<Arc<crate::motion::Anim>>,
 }
 
 impl Thumb {
@@ -87,6 +100,14 @@ impl Thumb {
 
     pub fn at(&self, x: u16, y: u16) -> [u8; 3] {
         self.px[y as usize * self.w as usize + x as usize]
+    }
+
+    /// The pixels to show `ms` into the animation (the still picture if it does not move).
+    pub fn frame_at(&self, ms: u64) -> &[[u8; 3]] {
+        match &self.anim {
+            Some(anim) => &anim.frames[anim.index_at(ms)],
+            None => &self.px,
+        }
     }
 }
 
@@ -115,7 +136,7 @@ pub fn decode_image(bytes: &[u8]) -> Result<DynamicImage, String> {
 }
 
 /// Blend a pixel's transparency onto `backdrop`.
-fn blend(p: image::Rgba<u8>, backdrop: [u8; 3]) -> [u8; 3] {
+pub(crate) fn blend(p: image::Rgba<u8>, backdrop: [u8; 3]) -> [u8; 3] {
     let a = p[3] as u32;
     std::array::from_fn(|c| ((p[c] as u32 * a + backdrop[c] as u32 * (255 - a)) / 255) as u8)
 }
@@ -149,6 +170,11 @@ impl Picture {
         let w = ((self.w as f64 * scale).round() as u32).clamp(1, cols.max(1) as u32);
         let mut h = ((self.h as f64 * scale).round() as u32).clamp(1, rows.max(1) as u32 * 2);
         h += h % 2;
+        Thumb { w: w as u16, h: h as u16, px: self.scale_to(w, h), duration: self.duration, anim: None }
+    }
+
+    /// Exactly `w`×`h` pixels, each the average of the block it covers.
+    pub fn scale_to(&self, w: u32, h: u32) -> Vec<[u8; 3]> {
         let mut px = Vec::with_capacity((w * h) as usize);
         for y in 0..h {
             let y0 = (y as u64 * self.h as u64 / h as u64) as u32;
@@ -172,7 +198,7 @@ impl Picture {
                 px.push([channel(0), channel(1), channel(2)]);
             }
         }
-        Thumb { w: w as u16, h: h as u16, px, duration: self.duration }
+        px
     }
 }
 
@@ -181,6 +207,9 @@ impl Picture {
 pub struct Sharp {
     pub proto: Protocol,
     pub kind: ProtocolType,
+    /// A Kitty picture with fewer pixels than its cells: the terminal
+    /// stretches it over them (see [`Sharp::stretch`]).
+    pub stretch: bool,
 }
 
 impl std::fmt::Debug for Sharp {
@@ -228,7 +257,19 @@ impl Sharp {
         let proto = graphics
             .new_protocol(DynamicImage::ImageRgb8(canvas), size, ratatui_image::Resize::Fit(None))
             .map_err(|e| format!("cannot draw the picture: {e}"))?;
-        Ok(Self { proto, kind: graphics.protocol_type() })
+        Ok(Self { proto, kind: graphics.protocol_type(), stretch: false })
+    }
+
+    /// Once drawn into `rect`: a stretched Kitty picture's transmission
+    /// (in the first cell, the first time only) says how many cells it covers.
+    pub fn stretch(&self, buf: &mut ratatui::buffer::Buffer, rect: ratatui::layout::Rect) {
+        const PLACE: &str = "a=T,U=1,";
+        let Some(cell) = buf.cell_mut((rect.x, rect.y)) else { return };
+        if !self.stretch || !cell.symbol().contains(PLACE) {
+            return;
+        }
+        let sized = cell.symbol().replacen(PLACE, &format!("{PLACE}c={},r={},", rect.width, rect.height), 1);
+        cell.set_symbol(&sized);
     }
 
     /// Cover exactly `cols`×`rows` cells, cutting off what sticks out: a feed
@@ -241,7 +282,7 @@ impl Sharp {
         let proto = graphics
             .new_protocol(DynamicImage::ImageRgb8(filled.to_rgb8()), ratatui::layout::Size::new(cols, rows), ratatui_image::Resize::Fit(None))
             .map_err(|e| format!("cannot draw the picture: {e}"))?;
-        Ok(Self { proto, kind: graphics.protocol_type() })
+        Ok(Self { proto, kind: graphics.protocol_type(), stretch: false })
     }
 }
 
@@ -323,7 +364,7 @@ fn spawn_err(e: tokio::task::JoinError) -> String {
 /// The only containers ffmpeg may open for a preview. Files come from
 /// other people: no playlists, concatenation lists or network streams that
 /// would make it read other files or go online.
-const VIDEO_FORMATS: &str = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,ogg";
+pub(crate) const VIDEO_FORMATS: &str = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,ogg";
 
 /// Whether ffmpeg is installed: video previews come from it.
 pub fn video_previews_available() -> bool {
@@ -334,7 +375,7 @@ pub fn video_previews_available() -> bool {
 
 /// Run a helper program and take what it prints; it is stopped after
 /// `limit`, and output past `max_out` bytes is not taken.
-fn run_for(mut cmd: std::process::Command, limit: std::time::Duration, max_out: u64) -> Result<Vec<u8>, String> {
+pub(crate) fn run_for(mut cmd: std::process::Command, limit: std::time::Duration, max_out: u64) -> Result<Vec<u8>, String> {
     use std::io::Read;
     use std::process::Stdio;
     let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|e| format!("cannot run ffmpeg: {e}"))?;
@@ -362,7 +403,7 @@ fn run_for(mut cmd: std::process::Command, limit: std::time::Duration, max_out: 
 }
 
 /// ffmpeg's name for a local file: never taken for a URL or an option.
-fn ffmpeg_input(path: &Path) -> std::ffi::OsString {
+pub(crate) fn ffmpeg_input(path: &Path) -> std::ffi::OsString {
     let mut input = std::ffi::OsString::from("file:");
     input.push(path.as_os_str());
     input
@@ -515,13 +556,25 @@ impl Remote {
         Ok(dest)
     }
 
-    /// Prepare a picture's thumbnail for the chat feed.
+    /// Prepare a picture's thumbnail for the chat feed. A GIF or a video
+    /// also gets its frames, to play.
     pub fn thumb(&self, file: FileMeta) {
         let me = self.clone();
         tokio::spawn(async move {
             let result = async {
                 let path = me.cached(&file).await?;
-                Ok(load_preview(path, is_video(&file)).await?.fit(THUMB_COLS, THUMB_ROWS))
+                let video = is_video(&file);
+                let mut thumb = load_preview(path.clone(), video).await?.fit(THUMB_COLS, THUMB_ROWS);
+                if video || crate::motion::may_move(&file.name) {
+                    let (w, h) = (thumb.w, thumb.h);
+                    // a clip that will not come apart leaves the still picture
+                    let anim = tokio::task::spawn_blocking(move || crate::motion::load_clip(&path, video).ok().flatten().map(|c| crate::motion::anim_for(&c, w, h)))
+                        .await
+                        .ok()
+                        .flatten();
+                    thumb.anim = anim.map(Arc::new);
+                }
+                Ok(thumb)
             }
             .await;
             let _ = me.events.send(TaskEvent::Thumb { file_id: file.id, result });
@@ -562,13 +615,29 @@ impl Remote {
     }
 
     /// Encode a feed thumbnail for the terminal's graphics, `cells` in size.
-    /// The screen-sized copy of the picture is plenty for it.
-    pub fn sharp_thumb(&self, file: FileMeta, graphics: Graphics, cells: (u16, u16)) {
+    /// The screen-sized copy of the picture is plenty for it; with `moving`,
+    /// a GIF or a video gets every frame encoded.
+    pub fn sharp_thumb(&self, file: FileMeta, graphics: Graphics, cells: (u16, u16), moving: bool) {
+        use crate::motion::{Pixels, load_clip, may_move, sharp_clip};
         let me = self.clone();
         tokio::spawn(async move {
             let result = async {
-                let pic = load_preview(me.cached(&file).await?, is_video(&file)).await?;
-                tokio::task::spawn_blocking(move || Sharp::encode_filled(&pic.into_image()?, &graphics, cells.0, cells.1).map(Arc::new))
+                let path = me.cached(&file).await?;
+                let video = is_video(&file);
+                if moving && (video || may_move(&file.name)) {
+                    let (path, graphics) = (path.clone(), graphics.clone());
+                    let clip = tokio::task::spawn_blocking(move || {
+                        let clip = load_clip(&path, video).ok().flatten()?;
+                        sharp_clip(&clip, &graphics, cells).ok()
+                    })
+                    .await
+                    .map_err(spawn_err)?;
+                    if let Some(clip) = clip {
+                        return Ok(Pixels::Moving(Arc::new(clip)));
+                    }
+                }
+                let pic = load_preview(path, video).await?;
+                tokio::task::spawn_blocking(move || Sharp::encode_filled(&pic.into_image()?, &graphics, cells.0, cells.1).map(|s| Pixels::Still(Arc::new(s))))
                     .await
                     .map_err(spawn_err)?
             }
@@ -742,48 +811,21 @@ pub fn cleanup_old_self() {
 }
 
 /// Start the new binary in place of this process. Returns only on error.
-pub fn restart(exe: &Path) -> std::io::Error {
-    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+pub fn restart(exe: &Path, args: &[std::ffi::OsString], env: &[(String, String)]) -> std::io::Error {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(args).envs(env.iter().map(|(k, v)| (k, v)));
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        std::process::Command::new(exe).args(args).exec()
+        cmd.exec()
     }
     #[cfg(not(unix))]
     {
-        match std::process::Command::new(exe).args(args).spawn() {
+        match cmd.spawn() {
             Ok(_) => std::process::exit(0),
             Err(e) => e,
         }
     }
-}
-
-/// Ask the room owner for their client build and, if it is a different
-/// version, download it and replace ourselves.
-pub fn update(node: Node, current: String, events: Events) {
-    tokio::spawn(async move {
-        let result = async {
-            let progress = {
-                let events = events.clone();
-                move |got, total| {
-                    let _ = events.send(TaskEvent::UpdateProgress { got, total });
-                }
-            };
-            let Some((version, data)) = node.fetch_update(&asset_name(), &current, progress).await? else {
-                return Ok(None);
-            };
-            if !looks_like_executable(&data) {
-                return Err("the download is not a program for this system — try again".to_string());
-            }
-            let exe = tokio::task::spawn_blocking(move || replace_self(&data))
-                .await
-                .map_err(spawn_err)?
-                .map_err(|e| format!("cannot replace the program file: {e}"))?;
-            Ok(Some((exe, version)))
-        }
-        .await;
-        let _ = events.send(TaskEvent::UpdateDone(result));
-    });
 }
 
 // ---------------------------------------------------------------- notifications

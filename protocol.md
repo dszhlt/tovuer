@@ -2,7 +2,7 @@
 
 There is no server. Every running client is a peer that keeps a full copy of
 the room, connects straight to every other member it can find and sends its
-own voice directly to the people in the same voice channel. The code lives in
+own voice and video directly to the people in the same voice channel. The code lives in
 `crates/node`; the shared types are in `crates/proto`.
 
 ## Rooms
@@ -58,10 +58,10 @@ Every bidirectional stream starts with a one-byte tag:
 |---|---|
 | `C` | control: the handshake, then frames for the life of the connection |
 | `F` | a file request |
-| `U` | an update request |
 
 Frames are a 4-byte big-endian length followed by JSON tagged with `t`.
-Frames a peer does not understand are skipped.
+Frames a peer does not understand are skipped. Unidirectional streams carry
+video, one frame each (see [Video](#video)).
 
 ### Handshake
 
@@ -85,7 +85,7 @@ and replaced by the new one.
 
 | `t` | Fields | Meaning |
 |---|---|---|
-| `state` | `state` | presence: nick, voice channel, mute, version, release on offer |
+| `state` | `state` | presence: nick, voice channel, mute, camera or screen on (`video`), watching the call (`watching`), whose screen it watches (`stream`), version |
 | `heads` | `heads` | the last operation number we have from each author |
 | `ops` | `ops` | operations the other side lacks (in batches of up to 256) |
 | `synced` | — | done answering a `heads` |
@@ -173,6 +173,41 @@ packets (the decoder conceals them), and a late packet takes its place if
 that is not played yet. Each speaker sends their own voice to each listener,
 so the load is spread over everyone: about 4 KB/s per listener while talking.
 
+## Video
+
+In a voice channel a peer can show its camera or its screen (one at a time)
+and open the call to watch the others. Both are part of `state`:
+`"video":"camera"` or `"screen"` — what it shows; `"watching":true` — it
+looks at the call. Video goes only to peers in the same voice channel who
+are watching, so a call nobody looks at costs nothing.
+
+A shared screen is also a stream for the whole room: any peer, in voice or
+not, may set `"stream":"<nick>"` in its `state` and gets that member's
+screen — only the screen, never the camera.
+
+Each frame travels on a unidirectional stream of its own: the byte `V`, then
+
+```
+[0]      version (1)
+[1]      source: 0 — a camera, 1 — a screen
+[2..6]   sequence number, u32 BE
+[6..8]   width, u16 BE  (up to 1920)
+[8..10]  height, u16 BE (up to 1200)
+[10..]   a JPEG of that size (a frame is up to 768 KB)
+```
+
+A stream per frame means a late frame never holds up a newer one. The
+sender keeps at most four frames on their way to each peer; frames that come
+while all are travelling wait, and only the newest of them goes — a slow
+link gets fewer frames instead of growing lag. A camera is sent at up to
+480×360, 30 frames a second (about 300–450 KB/s per watcher); a screen at up
+to 1440×900, 45 frames a second (up to about 5 MB/s per watcher while it
+moves), and a screen frame identical to the last one is not sent again
+(only every 2 s, for whoever started watching), so a still screen costs
+next to nothing. The receiver drops frames from anyone it is
+not watching (in its call, or as the `stream` it chose — then a screen only),
+and a JPEG whose real size differs from the header.
+
 ## Files
 
 A shared file is named by its content hash (the first 16 bytes of blake3,
@@ -190,20 +225,18 @@ The receiver checks the hash before keeping the file. Files are up to 50 MB.
 
 ## Updates
 
-The room owner can hand out client builds: `./run.sh release` puts them with
-a `VERSION` file into the `release` folder, and the owner's `state` carries
-the version. `/update` asks the owner's node directly — the connection itself
-proves it is the owner, so no extra signature is needed:
-
-```
-U  {"t":"update_req","asset":"tovuer-linux-amd64"}
-→  {"t":"blob","size":…,"version":"20261122-1800"} + the bytes      or      {"t":"missing"}
-```
-
-The client checks that the download is a program for its system before
-replacing itself and restarting.
+Peers do not hand out builds. `/update` takes the newest release from the
+project's GitHub releases (`api.github.com/repos/dszhlt/tovuer/releases/latest`):
+the file for its system (`tovuer-linux-amd64`, `tovuer-windows-amd64.exe`)
+from the release's own download address, checked against its size and the
+SHA-256 GitHub gives for it, and that it is a program for this system,
+before it replaces the client. Versions are compared by number and never go
+back. Releases are built by GitHub Actions from a `v*` tag.
 
 ## Limits
+
+Video is a mesh like voice: whoever shows video sends it to every watcher,
+so it suits a few cameras at a time.
 
 Nick — up to 24 characters without spaces; channel name — up to 24 (letters,
 digits, `-`, `_`); text — up to 4000 characters; topic — up to 120; up to 20

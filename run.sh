@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 # tovuer — run and build from anywhere:
-#   ./run.sh client [args] | install | build | test | smoke
-#            | friend <room> [password] | release <room> [password]
+#   ./run.sh client [args] | install | build | test | smoke | friend <room> [password]
+# Releases (what /update installs) are made by GitHub Actions from a tag:
+#   git tag v2.1.0 && git push origin v2.1.0
 set -e
 cd "$(dirname "$0")"
 export PATH="$HOME/.local/share/mise/shims:$HOME/.cargo/bin:$HOME/.local/zig:$PATH"
 
 WIN_TARGET="x86_64-pc-windows-gnu"
-# where the client looks for builds to hand out with /update (Paths::release_dir)
-RELEASE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/tovuer/release"
 
 # Windows build: cross-compiled through zig, no sudo or mingw needed.
 build_windows() {  # $1 — build folder (target-dir)
@@ -65,22 +64,8 @@ case "${1:-client}" in
       echo "done: ./tovuer-friend (no .exe)"
     fi
     ;;
-  release)
-    # A release: friend builds go to the release folder; while you (the room
-    # owner) are online, members get them with /update.
-    if [ -z "${2:-}" ]; then echo "usage: ./run.sh release <room> [password]"; exit 1; fi
-    export TOVUER_VERSION="$(date +%Y%m%d-%H%M)"
-    "$0" friend "$2" "${3:-}"
-    mkdir -p "$RELEASE_DIR"
-    cp -f tovuer-friend "$RELEASE_DIR/tovuer-linux-amd64"
-    if [ -f tovuer-friend.exe ]; then
-      cp -f tovuer-friend.exe "$RELEASE_DIR/tovuer-windows-amd64.exe"
-    fi
-    printf '%s' "$TOVUER_VERSION" > "$RELEASE_DIR/VERSION"
-    echo "release $TOVUER_VERSION → $RELEASE_DIR (members are offered /update while you are online)"
-    ;;
   *)
-    echo "usage: ./run.sh [client [args]|install|build|test|smoke|friend <room> [password]|release <room> [password]]"
+    echo "usage: ./run.sh [client [args]|install|build|test|smoke|friend <room> [password]]"
     exit 1
     ;;
 esac

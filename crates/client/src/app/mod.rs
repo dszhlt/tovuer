@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tovuer_proto::{ChannelKind, ClientMsg, FileMeta, Message, User};
+use tovuer_proto::{ChannelKind, ClientMsg, FileMeta, Message, User, VideoSource};
 use tovuer_voice::{Engine, Sound, StreamInfo};
 
 use self::input::Input;
@@ -27,6 +27,7 @@ use crate::settings::{Paths, Settings, State};
 use crate::transfer::{Events, Remote, TaskEvent, Thumb};
 use crate::ui::UiState;
 use crate::ui::theme::Theme;
+use crate::video::{Capture, VideoFrame, source_name};
 
 /// How the program was started: what is baked into the build and what came
 /// from the command line.
@@ -101,13 +102,16 @@ pub enum ThumbState {
 pub enum SharpThumb {
     /// Being encoded for this many cells.
     Loading((u16, u16)),
-    Ready(Arc<crate::transfer::Sharp>),
+    Ready(crate::motion::Pixels),
     /// Blocks stay.
     Failed,
 }
 
 /// Feed thumbnails encoded at the same time at most: each decodes a picture.
 const SHARP_THUMBS_AT_ONCE: usize = 2;
+/// Moving feed thumbnails kept in the terminal's graphics: each holds every
+/// frame encoded; the oldest are dropped and encoded again when seen.
+const MOVING_KEPT: usize = 6;
 
 /// We are in a voice channel.
 #[derive(Debug, Clone)]
@@ -117,6 +121,36 @@ pub struct VoiceSession {
     /// The devices are still opening.
     pub starting: bool,
     pub info: Option<StreamInfo>,
+}
+
+/// The call view of our voice channel: everyone in it as tiles, with their
+/// camera or screen where they show one.
+#[derive(Default)]
+pub struct Call {
+    /// On screen instead of the feed.
+    pub open: bool,
+    /// One person big (user id).
+    pub focus: Option<u32>,
+    /// The tile under the cursor while picking tiles.
+    pub sel: usize,
+    /// The newest frame of each person showing video (ours under our id).
+    pub frames: HashMap<u32, Arc<VideoFrame>>,
+    /// Tiles in the terminal's own graphics.
+    pub sharp: HashMap<u32, SharpTile>,
+    /// A frame came since the last draw.
+    pub fresh: bool,
+}
+
+/// A video tile in the terminal's own graphics: the last frame encoded.
+#[derive(Default)]
+pub struct SharpTile {
+    pub ready: Option<(u32, Arc<crate::transfer::Sharp>)>,
+    /// The size the screen last wanted, in cells.
+    pub cells: Option<(u16, u16)>,
+    /// A frame is being encoded.
+    pub busy: bool,
+    /// The terminal could not take it: blocks stay.
+    pub failed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,6 +204,14 @@ pub struct Completion {
     pub sel: usize,
 }
 
+/// Where the updated program goes right after it starts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rejoin {
+    pub room: String,
+    pub nick: String,
+    pub password: Option<String>,
+}
+
 /// What the input is for: a reply to a message or an edit of our own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Compose {
@@ -220,6 +262,13 @@ pub struct App {
     pub users: Vec<User>,
     pub speaking: HashSet<u32>,
     pub voice: Option<VoiceSession>,
+    pub call: Call,
+    /// Our camera or screen, while it is on.
+    pub capture: Option<Capture>,
+    /// Whose shared screen we watch above the feed (a nick).
+    pub watch: Option<String>,
+    /// …over the whole window.
+    pub watch_full: bool,
 
     pub focus: Focus,
     pub input: Input,
@@ -231,6 +280,8 @@ pub struct App {
     pub transfers: Vec<Transfer>,
     pub thumbs: HashMap<String, ThumbState>,
     pub sharp_thumbs: HashMap<String, SharpThumb>,
+    /// Which of `sharp_thumbs` move, oldest first.
+    moving: VecDeque<String>,
     pub updating: Option<(u64, u64)>,
 
     pub engine: Arc<Engine>,
@@ -254,6 +305,8 @@ pub struct App {
     pub quit: bool,
     /// Run this file after exiting (self-update).
     pub restart: Option<PathBuf>,
+    /// …straight back into this room.
+    pub rejoin: Option<Rejoin>,
 
     title: String,
     next_upload: u64,
@@ -311,6 +364,10 @@ impl App {
             users: Vec::new(),
             speaking: HashSet::new(),
             voice: None,
+            call: Call::default(),
+            capture: None,
+            watch: None,
+            watch_full: false,
             focus: Focus::Input,
             input: Input::new(tovuer_proto::MAX_TEXT_CHARS),
             compose: None,
@@ -321,6 +378,7 @@ impl App {
             transfers: Vec::new(),
             thumbs: HashMap::new(),
             sharp_thumbs: HashMap::new(),
+            moving: VecDeque::new(),
             updating: None,
             engine,
             net,
@@ -336,6 +394,7 @@ impl App {
             frame: 0,
             quit: false,
             restart: None,
+            rejoin: None,
             title: String::new(),
             next_upload: 1,
             last_typing: None,
@@ -566,6 +625,7 @@ impl App {
         self.me = None;
         self.users.clear();
         self.speaking.clear();
+        self.watch = None;
         // the next entry is a fresh one, not "back in the room"
         self.welcomed_before = false;
         self.dirty = true;
@@ -644,6 +704,7 @@ impl App {
         self.focused
             && self.screen == Screen::Main
             && self.overlay.is_none()
+            && !self.call_open()
             && self.channel().is_some_and(|c| c.scroll == 0)
     }
 
@@ -695,7 +756,10 @@ impl App {
     }
 
     pub fn set_focus(&mut self, focus: Focus) {
-        if focus == Focus::Messages {
+        if focus == Focus::Messages && self.call_open() {
+            // in the call the feed is the tiles: pick one
+            self.call.sel = self.call.sel.min(self.call_members().len().saturating_sub(1));
+        } else if focus == Focus::Messages {
             match self.channel_mut() {
                 Some(ch) if !ch.messages.is_empty() => {
                     if ch.selected.is_none() {
@@ -742,6 +806,10 @@ impl App {
             self.warn("not in the room yet — cannot join voice");
             return;
         }
+        let me = self.my_id();
+        self.call.frames.retain(|id, _| *id == me);
+        self.call.sharp.retain(|id, _| *id == me);
+        self.call.focus = None;
         self.net.send(ClientMsg::VoiceJoin { channel: name.clone() });
         let running = self.engine.running();
         self.voice = Some(VoiceSession { channel: name, since: Instant::now(), starting: !running, info: self.engine.info() });
@@ -769,6 +837,16 @@ impl App {
             self.stop_engine();
             self.sent_speaking = false;
             self.dirty = true;
+        }
+        // no voice channel, no call: the camera goes off too; a screen
+        // watched from the chat stays
+        self.capture = None;
+        let watched = self.watched().map(|u| u.id);
+        let mut call = std::mem::take(&mut self.call);
+        call.frames.retain(|id, _| Some(*id) == watched);
+        self.call = Call { frames: call.frames, ..Call::default() };
+        if self.focus == Focus::Messages && self.channel().is_none_or(|c| c.selected.is_none()) {
+            self.focus = Focus::Input;
         }
     }
 
@@ -850,6 +928,245 @@ impl App {
         self.note(Tone::Info, if now { "sound off: you hear no one and no one hears you" } else { "sound on" });
     }
 
+    // ------------------------------------------------------------------ video
+
+    /// The call view is on screen.
+    pub fn call_open(&self) -> bool {
+        self.call.open && self.voice.is_some()
+    }
+
+    /// What we show: the camera, the screen or nothing.
+    pub fn sharing(&self) -> Option<VideoSource> {
+        self.capture.as_ref().map(|c| c.source)
+    }
+
+    /// Who the call shows, in tile order: us first (even before the node
+    /// has confirmed where we are), then the others.
+    pub fn call_members(&self) -> Vec<User> {
+        let Some(session) = &self.voice else { return Vec::new() };
+        let me = self.my_id();
+        let mut members: Vec<User> = Vec::new();
+        if let Some(user) = self.user(me) {
+            members.push(User { voice: Some(session.channel.clone()), video: self.sharing(), ..user.clone() });
+        }
+        members.extend(self.voice_members(&session.channel).into_iter().filter(|u| u.id != me).cloned());
+        members
+    }
+
+    /// Someone in our voice channel shows video (and it is not us).
+    fn shows_video_to_us(&self, id: u32) -> bool {
+        id != self.my_id() && self.user(id).is_some_and(|u| u.video.is_some() && self.in_my_room(u))
+    }
+
+    /// Open or close the call view of our voice channel.
+    pub fn toggle_call(&mut self) {
+        if self.voice.is_none() {
+            self.warn("join a voice channel first — the call is there");
+            return;
+        }
+        self.set_call_open(!self.call.open);
+    }
+
+    pub fn set_call_open(&mut self, open: bool) {
+        if self.voice.is_none() || self.call.open == open {
+            return;
+        }
+        self.call.open = open;
+        if !open {
+            // the frames of others stop coming: drop them (not of a screen watched from the chat)
+            let keep = [Some(self.my_id()), self.watched().map(|u| u.id)];
+            self.call.frames.retain(|id, _| keep.contains(&Some(*id)));
+            self.call.sharp.clear();
+            self.call.focus = None;
+            if self.focus == Focus::Messages {
+                self.focus = Focus::Input;
+            }
+        }
+        self.send_video_state();
+        self.dirty = true;
+    }
+
+    /// Tell the node what we show and what we watch.
+    pub(crate) fn send_video_state(&self) {
+        if self.online() {
+            let stream = self.watch.clone();
+            self.net.send(ClientMsg::Video { source: self.sharing(), watching: self.call.open && self.voice.is_some(), stream });
+        }
+    }
+
+    /// Others sharing their screen right now — live streams anyone can watch.
+    pub fn live(&self) -> Vec<&User> {
+        let me = self.my_id();
+        self.users.iter().filter(|u| u.id != me && u.video == Some(VideoSource::Screen) && u.voice.is_some()).collect()
+    }
+
+    /// The screen we watch above the feed, while it is shared.
+    pub fn watched(&self) -> Option<&User> {
+        let nick = self.watch.as_deref()?;
+        self.user_named(nick).filter(|u| u.video == Some(VideoSource::Screen) && u.id != self.my_id())
+    }
+
+    /// Watch someone's shared screen above the feed (`None` — stop).
+    pub fn watch_stream(&mut self, nick: Option<String>) {
+        let nick = match nick {
+            Some(nick) => match self.user_named(&nick) {
+                Some(u) if u.id == self.my_id() => {
+                    self.warn("that is your own screen — Alt+C shows it in the call");
+                    return;
+                }
+                Some(u) if u.video == Some(VideoSource::Screen) => Some(u.name.clone()),
+                Some(u) => {
+                    self.warn(format!("{} is not sharing a screen right now", u.name));
+                    return;
+                }
+                None => {
+                    self.warn(format!("nobody called “{nick}” is online"));
+                    return;
+                }
+            },
+            None => None,
+        };
+        if nick == self.watch {
+            return;
+        }
+        if let Some(old) = self.watched().map(|u| u.id) {
+            // frames of the call stay; the panel's own go
+            if !self.call_open() || !self.shows_video_to_us(old) {
+                self.forget_video(old);
+            }
+        }
+        self.watch = nick;
+        self.watch_full &= self.watch.is_some();
+        if let Some(nick) = &self.watch {
+            self.note(Tone::Info, format!("watching {nick}'s screen"));
+        }
+        self.send_video_state();
+        self.dirty = true;
+    }
+
+    /// The watched screen fills the window.
+    pub fn stream_full(&self) -> bool {
+        self.watch_full && self.watched().is_some() && !self.call_open() && self.overlay.is_none()
+    }
+
+    /// Alt+F: the watched screen over the whole window, or back to the chat.
+    pub fn toggle_stream_full(&mut self) {
+        if self.watched().is_none() {
+            self.watch_full = false;
+            self.warn("nothing to show big — Alt+W watches a shared screen");
+            return;
+        }
+        self.watch_full = !self.watch_full;
+        self.dirty = true;
+    }
+
+    /// Alt+W: watch a live screen, the next one, or stop.
+    pub fn toggle_watch(&mut self) {
+        let live: Vec<String> = self.live().iter().map(|u| u.name.clone()).collect();
+        let next = match self.watched().map(|u| u.name.clone()) {
+            Some(now) => live.iter().position(|n| *n == now).and_then(|i| live.get(i + 1)).cloned(),
+            None if live.is_empty() => {
+                self.warn("nobody is sharing a screen right now");
+                return;
+            }
+            None => live.first().cloned(),
+        };
+        self.watch_stream(next);
+    }
+
+    /// Turn the camera or the screen on, or off if it is the one on. One at a time.
+    pub fn toggle_video(&mut self, source: VideoSource) {
+        let on = self.sharing() != Some(source);
+        self.set_video(on.then_some(source));
+    }
+
+    pub fn set_video(&mut self, source: Option<VideoSource>) {
+        if source.is_some() && self.voice.is_none() {
+            self.warn("join a voice channel first — video goes to the people there");
+            return;
+        }
+        if self.sharing() == source {
+            return;
+        }
+        let was = self.sharing();
+        self.capture = None; // stops what was on
+        let me = self.my_id();
+        self.call.frames.remove(&me);
+        self.call.sharp.remove(&me);
+        match source {
+            Some(source) => {
+                let device = match source {
+                    VideoSource::Camera => self.settings.camera.clone(),
+                    VideoSource::Screen => self.settings.screen.clone(),
+                };
+                let net = self.net.clone();
+                self.capture = Some(Capture::start(source, &device, move |frame| net.video(frame), self.tasks.clone()));
+                let channel = self.voice.as_ref().map(|v| v.channel.clone()).unwrap_or_default();
+                match source {
+                    VideoSource::Camera => self.ok(format!("camera on — {channel} sees you in the call")),
+                    VideoSource::Screen => self.warn(format!("sharing your screen — {channel} sees all of it")),
+                }
+                // you want to see what you show
+                if !self.call.open {
+                    self.call.open = true;
+                }
+            }
+            None => {
+                if let Some(was) = was {
+                    self.note(Tone::Info, format!("{} off", source_name(was)));
+                }
+            }
+        }
+        self.send_video_state();
+        self.dirty = true;
+    }
+
+    /// A video frame: ours, or of someone in the call.
+    pub fn on_video(&mut self, from: Option<u32>, frame: Arc<VideoFrame>) {
+        let watched = self.watched().map(|u| u.id);
+        let id = match from {
+            Some(id) if self.call_open() && self.shows_video_to_us(id) => id,
+            Some(id) if Some(id) == watched && frame.source == VideoSource::Screen => id,
+            None if self.sharing() == Some(frame.source) => self.my_id(),
+            _ => return,
+        };
+        self.call.frames.insert(id, frame);
+        self.call.fresh |= self.call_open() || Some(id) == watched;
+        // real pixels: start on the frame now rather than at the next draw
+        self.encode_sharp_tile(id);
+    }
+
+    /// Our camera or screen stopped by itself.
+    pub fn on_video_ended(&mut self, source: VideoSource, error: Option<String>) {
+        if self.sharing() != Some(source) {
+            return;
+        }
+        self.capture = None;
+        let me = self.my_id();
+        self.call.frames.remove(&me);
+        self.call.sharp.remove(&me);
+        self.send_video_state();
+        match error {
+            Some(e) => self.error(format!("{} off: {e}", source_name(source))),
+            None => self.note(Tone::Info, format!("{} off", source_name(source))),
+        }
+    }
+
+    /// Someone's video went away (off, left the channel, went offline).
+    pub fn forget_video(&mut self, id: u32) {
+        self.call.frames.remove(&id);
+        self.call.sharp.remove(&id);
+        if self.call.focus == Some(id) {
+            self.call.focus = None;
+        }
+    }
+
+    /// Make one tile big, or go back to all of them.
+    pub fn spotlight(&mut self, id: u32) {
+        self.call.focus = if self.call.focus == Some(id) { None } else { Some(id) };
+        self.dirty = true;
+    }
+
     /// Apply our personal settings for a peer to the engine.
     fn apply_peer(&self, user: &User) {
         self.engine.set_peer_muted(user.id, self.settings.is_muted(&user.name));
@@ -903,11 +1220,33 @@ impl App {
         }
     }
 
+    /// Noise suppression as one word: off, soft, normal or strong.
+    pub fn denoise_mode(&self) -> &'static str {
+        if self.settings.denoise { tovuer_voice::Strength::from_u8(self.settings.denoise_level).name() } else { "off" }
+    }
+
+    /// Set noise suppression by name; `false` — no such mode.
+    pub fn set_denoise_mode(&mut self, mode: &str) -> bool {
+        let (on, level) = match mode {
+            "off" => (false, self.settings.denoise_level),
+            "soft" => (true, 0),
+            "normal" | "on" => (true, 1),
+            "strong" => (true, 2),
+            _ => return false,
+        };
+        self.settings.denoise = on;
+        self.settings.denoise_level = level;
+        self.apply_audio_settings();
+        self.save_settings();
+        true
+    }
+
     /// Hand volumes, noise suppression and the rest from settings to the engine.
     pub fn apply_audio_settings(&self) {
         use std::sync::atomic::Ordering::Relaxed;
         let ctl = self.engine.controls();
         ctl.denoise.store(self.settings.denoise, Relaxed);
+        ctl.set_denoise_strength(tovuer_voice::Strength::from_u8(self.settings.denoise_level));
         ctl.agc.store(self.settings.agc, Relaxed);
         ctl.set_mic_gain(self.settings.mic_gain as f32 / 100.0);
         ctl.set_out_gain(self.settings.volume as f32 / 100.0);
@@ -1026,6 +1365,32 @@ impl App {
             .unwrap_or_default()
     }
 
+    /// A moving thumbnail was encoded: keep it, dropping the oldest beyond the limit.
+    pub fn keep_moving(&mut self, file_id: &str) {
+        self.moving.retain(|id| id != file_id);
+        self.moving.push_back(file_id.to_string());
+        while self.moving.len() > MOVING_KEPT {
+            if let Some(old) = self.moving.pop_front() {
+                self.sharp_thumbs.remove(&old);
+            }
+        }
+    }
+
+    /// GIFs and videos play in the feed, or stand still.
+    pub fn set_animate(&mut self, on: bool) {
+        self.settings.animate = on;
+        // real pixels were encoded moving or still: again, the other way
+        self.sharp_thumbs.clear();
+        self.moving.clear();
+        self.save_settings();
+        self.dirty = true;
+    }
+
+    /// Whether moving previews move right now: on, and the window is looked at.
+    pub fn animating_previews(&self) -> bool {
+        self.settings.animate && self.focused
+    }
+
     /// The interface wants thumbnails of these pictures — queue them.
     pub fn fetch_wanted_thumbs(&mut self) {
         let wanted = std::mem::take(&mut self.ui.want_thumbs);
@@ -1037,6 +1402,7 @@ impl App {
             };
             remote.sharp(file, graphics, area, backdrop);
         }
+        self.encode_sharp_video();
         if let Some(graphics) = self.graphics.clone() {
             for (file, cells) in std::mem::take(&mut self.ui.want_sharp_thumbs) {
                 let busy = self.sharp_thumbs.values().filter(|s| matches!(s, SharpThumb::Loading(_))).count();
@@ -1047,7 +1413,7 @@ impl App {
                     continue;
                 }
                 self.sharp_thumbs.insert(file.id.clone(), SharpThumb::Loading(cells));
-                remote.sharp_thumb(file, graphics.clone(), cells);
+                remote.sharp_thumb(file, graphics.clone(), cells, self.settings.animate);
             }
         }
         for file in wanted {
@@ -1059,17 +1425,68 @@ impl App {
         }
     }
 
-    pub fn start_update(&mut self) {
-        let Some(remote) = self.remote.clone().filter(|_| self.online()) else {
-            self.error("not in a room — nobody to update from");
+    /// The video tiles the screen asked for in the terminal's own graphics.
+    fn encode_sharp_video(&mut self) {
+        for (user, cells) in std::mem::take(&mut self.ui.want_sharp_video) {
+            self.call.sharp.entry(user).or_default().cells = Some(cells);
+            self.encode_sharp_tile(user);
+        }
+    }
+
+    /// Encode the newest frame of a tile for the terminal's own graphics,
+    /// unless one is being encoded already (it asks again when done).
+    pub fn encode_sharp_tile(&mut self, user: u32) {
+        let shown = self.call_open() || self.watched().is_some_and(|u| u.id == user);
+        let Some(graphics) = self.graphics.clone().filter(|_| self.sharp_pictures() && shown) else { return };
+        if tokio::runtime::Handle::try_current().is_err() {
             return;
+        }
+        let Some(frame) = self.call.frames.get(&user).cloned() else { return };
+        let Some(tile) = self.call.sharp.get_mut(&user) else { return };
+        let Some(cells) = tile.cells else { return };
+        let current = tile.ready.as_ref().is_some_and(|(seq, s)| *seq == frame.seq && s.size() == cells);
+        if tile.busy || tile.failed || current {
+            return;
+        }
+        tile.busy = true;
+        let backdrop = match self.theme.raised {
+            ratatui::style::Color::Rgb(r, g, b) => [r, g, b],
+            _ => [24, 24, 28],
         };
+        let mirror = user == self.my_id() && frame.source == VideoSource::Camera;
+        let tasks = self.tasks.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = crate::video::encode_sharp(&frame.image, mirror, &graphics, cells.0, cells.1, backdrop, crate::video::kitty_id(user));
+            let _ = tasks.send(TaskEvent::SharpVideo { user, seq: frame.seq, cells, result: result.map(Arc::new) });
+        });
+    }
+
+    /// `/update`: the newest release from GitHub. Works outside a room too.
+    pub fn start_update(&mut self) {
         if self.updating.is_some() {
             return;
         }
+        if tokio::runtime::Handle::try_current().is_err() {
+            self.error("cannot update right now");
+            return;
+        }
         self.updating = Some((0, 0));
-        self.toast(Tone::Info, "checking for an update…");
-        crate::transfer::update(remote.node, self.launch.version.clone(), self.tasks.clone());
+        self.toast(Tone::Info, "looking for a new version on GitHub…");
+        crate::update::update(self.launch.version.clone(), self.tasks.clone());
+    }
+
+    /// Before the updated program takes over: back into this room, and a
+    /// build with the room built in keeps it — the update is a general build.
+    fn prepare_restart(&mut self) {
+        let password = if self.launch.friend { self.launch.password.clone() } else { Some(self.settings.password.clone()) };
+        let password = password.filter(|p| !p.is_empty());
+        if self.launch.friend {
+            self.settings.room = self.launch.room.clone();
+            self.settings.password = password.clone().unwrap_or_default();
+            self.save_settings();
+        }
+        self.rejoin = (self.screen == Screen::Main && !self.room.is_empty() && self.me.is_some())
+            .then(|| Rejoin { room: self.room.clone(), nick: self.my_name().to_string(), password });
     }
 
     // ------------------------------------------------------------------ messages
@@ -1232,9 +1649,14 @@ impl App {
         self.overlay = Some(Overlay::Settings(overlay::SettingsView::default()));
         let tasks = self.tasks.clone();
         if tokio::runtime::Handle::try_current().is_ok() {
+            let cams = tasks.clone();
             tokio::task::spawn_blocking(move || {
                 let result = tovuer_voice::list_devices().map_err(|e| e.to_string());
                 let _ = tasks.send(TaskEvent::Devices(result));
+            });
+            tokio::task::spawn_blocking(move || {
+                let names = crate::video::cameras().into_iter().map(|c| c.name).collect();
+                let _ = cams.send(TaskEvent::Cameras(names));
             });
         }
         self.dirty = true;
@@ -1252,7 +1674,23 @@ impl App {
             let hint = if ch.unread > 0 { format!("{} new", ch.unread) } else { String::new() };
             actions.push(act("#", format!("Go to #{}", ch.name), &hint, Cmd::Channel(ch.name.clone())));
         }
+        let watched = self.watched().map(|u| u.name.clone());
+        for user in self.live() {
+            if Some(&user.name) != watched.as_ref() {
+                let label = format!("Watch {}'s screen", user.name);
+                actions.push(act(self.icons.get(Icon::Screen), label, "Alt+W", Cmd::Watch(Some(user.name.clone()))));
+            }
+        }
+        if let Some(name) = watched {
+            actions.push(act(self.icons.get(Icon::Screen), format!("Stop watching {name}'s screen"), "/watch off", Cmd::Watch(None)));
+        }
         if self.voice.is_some() {
+            let call = if self.call.open { "Back to the chat" } else { "Open the call: cameras and screens" };
+            actions.push(act(self.icons.get(Icon::Voice), call.into(), "Alt+C", Cmd::Call));
+            let camera = if self.sharing() == Some(VideoSource::Camera) { "Turn the camera off" } else { "Turn the camera on" };
+            actions.push(act(self.icons.get(Icon::Camera), camera.into(), "Alt+V", Cmd::Video(VideoSource::Camera)));
+            let screen = if self.sharing() == Some(VideoSource::Screen) { "Stop sharing the screen" } else { "Share your screen" };
+            actions.push(act(self.icons.get(Icon::Screen), screen.into(), "Alt+S", Cmd::Video(VideoSource::Screen)));
             actions.push(act(self.icons.get(Icon::Muted), "Leave the voice channel".into(), "", Cmd::LeaveVoice));
         }
         for ch in self.channels.iter().filter(|c| !c.is_text()) {
@@ -1287,7 +1725,7 @@ impl App {
                 actions.push(act("×", label, "/delchannel", Cmd::DeleteChannel(ch.name.clone())));
             }
         }
-        actions.push(act("↻", "Update the client".into(), "/update", Cmd::Update));
+        actions.push(act("↻", "Update tovuer from GitHub".into(), "/update", Cmd::Update));
         actions.push(act("↻", "Rejoin the room".into(), "", Cmd::Reconnect));
         actions.push(act("≡", "System log".into(), "Ctrl+L", Cmd::Log));
         actions.push(act("?", "Help".into(), "F1", Cmd::Help));
@@ -1302,6 +1740,9 @@ impl App {
                 self.set_focus(Focus::Input);
             }
             Cmd::Voice(name) => self.join_voice(&name),
+            Cmd::Call => self.toggle_call(),
+            Cmd::Watch(nick) => self.watch_stream(nick),
+            Cmd::Video(source) => self.toggle_video(source),
             Cmd::LeaveVoice => self.leave_voice(),
             Cmd::Mute => self.toggle_mute(),
             Cmd::Deafen => self.toggle_deafen(),

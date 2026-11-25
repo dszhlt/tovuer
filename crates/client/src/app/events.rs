@@ -105,7 +105,7 @@ impl App {
 
     fn on_server(&mut self, msg: ServerMsg) {
         match msg {
-            ServerMsg::Welcome { id, name, server, admin, channels, users, max_file, client_version, motd, .. } => {
+            ServerMsg::Welcome { id, name, server, admin, channels, users, max_file, motd, .. } => {
                 let reconnect = self.welcomed_before && self.server_name == server;
                 self.me = Some(Me { id, name: name.clone(), admin });
                 self.server_name = server;
@@ -125,9 +125,16 @@ impl App {
                     Some(channel) if self.channels.iter().any(|c| !c.is_text() && c.name == channel) => {
                         self.net.send(ClientMsg::VoiceJoin { channel });
                         self.net.send(ClientMsg::VoiceState { muted: self.muted(), deafened: self.deafened() });
+                        if self.sharing().is_some() || self.call.open {
+                            self.net.send(ClientMsg::Video { source: self.sharing(), watching: self.call.open, stream: self.watch.clone() });
+                        }
                         self.sync_voice_peers();
                     }
                     Some(_) => self.leave_voice_locally(),
+                    None if self.watch.is_some() => {
+                        // still watching someone's screen from the chat
+                        self.net.send(ClientMsg::Video { source: None, watching: false, stream: self.watch.clone() });
+                    }
                     None => {}
                 }
 
@@ -141,15 +148,6 @@ impl App {
                     }
                 }
                 self.welcomed_before = true;
-                match client_version {
-                    Some(v) if v != self.launch.version => {
-                        if self.update_available.as_ref() != Some(&v) {
-                            self.toast(Tone::Info, format!("the room owner has version {v} — update with /update"));
-                        }
-                        self.update_available = Some(v);
-                    }
-                    _ => self.update_available = None,
-                }
             }
 
             ServerMsg::Error { msg, .. } => self.error(msg),
@@ -163,6 +161,12 @@ impl App {
 
             ServerMsg::UserLeave { id } => {
                 self.speaking.remove(&id);
+                self.forget_video(id);
+                if self.watched().is_some_and(|u| u.id == id) {
+                    self.watch = None;
+                    self.watch_full = false;
+                    self.send_video_state();
+                }
                 if let Some(at) = self.users.iter().position(|u| u.id == id) {
                     let gone = self.users.remove(at);
                     self.note(Tone::Info, format!("{} went offline", gone.name));
@@ -270,7 +274,7 @@ impl App {
         self.users.sort_by_key(|u| u.name.to_lowercase());
     }
 
-    fn in_my_room(&self, user: &User) -> bool {
+    pub(crate) fn in_my_room(&self, user: &User) -> bool {
         match (&self.voice, &user.voice) {
             (Some(session), Some(room)) => session.channel == *room && user.id != self.my_id(),
             _ => false,
@@ -281,6 +285,36 @@ impl App {
         let before = self.user(user.id).cloned();
         let was_here = before.as_ref().is_some_and(|u| self.in_my_room(u));
         let is_here = self.in_my_room(&user);
+        let video_was = before.as_ref().and_then(|u| u.video).filter(|_| was_here);
+        let video_now = user.video.filter(|_| is_here);
+        let me = user.id == self.my_id();
+        let screen_was = before.as_ref().is_some_and(|u| u.video == Some(tovuer_proto::VideoSource::Screen));
+        let screen_now = user.video == Some(tovuer_proto::VideoSource::Screen);
+        let watching_them = !me && self.watch.as_deref().is_some_and(|n| n.to_lowercase() == user.name.to_lowercase());
+        // a screen watched from the chat keeps its picture through other changes
+        if (video_now.is_none() || video_now != video_was) && !(watching_them && screen_now) {
+            self.forget_video(user.id);
+        }
+        // someone started showing something: say where to see it
+        if let Some(source) = video_now.filter(|s| video_was != Some(*s) && !self.call.open) {
+            let what = match source {
+                tovuer_proto::VideoSource::Camera => "turned the camera on",
+                tovuer_proto::VideoSource::Screen => "is sharing the screen",
+            };
+            self.toast(Tone::Info, format!("{} {what} — Alt+C opens the call", user.name));
+        }
+        // a screen anyone in the room can watch from the chat
+        if !me && screen_now && !screen_was && !is_here && !watching_them {
+            let channel = user.voice.clone().unwrap_or_default();
+            self.toast(Tone::Info, format!("{} is live in {channel} — Alt+W to watch", user.name));
+        }
+        if watching_them && !screen_now {
+            self.forget_video(user.id);
+            self.toast(Tone::Info, format!("{}'s stream ended", user.name));
+            self.watch = None;
+            self.watch_full = false;
+            self.send_video_state();
+        }
         if user.voice.is_none() {
             self.speaking.remove(&user.id);
         }
@@ -363,7 +397,11 @@ impl App {
     }
 
     pub fn on_task(&mut self, event: TaskEvent) {
-        self.dirty = true;
+        // video comes many times a second: it waits for the next tick to be
+        // drawn (real pixels are drawn as soon as they are ready)
+        if !matches!(event, TaskEvent::Video { .. }) {
+            self.dirty = true;
+        }
         match event {
             TaskEvent::Upload { id, sent, total } => {
                 if let Some(t) = self.transfers.iter_mut().find(|t| t.key == format!("up{id}")) {
@@ -417,7 +455,12 @@ impl App {
             TaskEvent::SharpThumb { file_id, cells, result } => {
                 if matches!(self.sharp_thumbs.get(&file_id), Some(SharpThumb::Loading(c)) if *c == cells) {
                     let state = match result {
-                        Ok(sharp) => SharpThumb::Ready(sharp),
+                        Ok(pixels) => {
+                            if pixels.moving() {
+                                self.keep_moving(&file_id);
+                            }
+                            SharpThumb::Ready(pixels)
+                        }
                         // the blocks stay; the viewer says what is wrong if opened
                         Err(_) => SharpThumb::Failed,
                     };
@@ -453,16 +496,47 @@ impl App {
             TaskEvent::UpdateDone(result) => {
                 self.updating = None;
                 match result {
-                    Ok(None) => self.ok(format!("you already have the latest version ({})", self.launch.version)),
+                    Ok(None) => {
+                        self.update_available = None;
+                        self.ok(format!("you already have the latest version ({})", self.launch.version));
+                    }
                     Ok(Some((exe, version))) => {
                         self.ok(format!("updated to {version} — restarting"));
+                        self.prepare_restart();
                         self.restart = Some(exe);
                         self.quit = true;
                     }
                     Err(e) => self.error(format!("update failed: {e}")),
                 }
             }
+            TaskEvent::UpdateFound(version) => {
+                if self.update_available.as_ref() != Some(&version) {
+                    self.toast(Tone::Info, format!("tovuer {version} is out — /update installs it"));
+                }
+                self.update_available = Some(version);
+            }
             TaskEvent::Voice(result) => self.on_voice_started(result),
+            TaskEvent::Video { from, frame } => self.on_video(from, frame),
+            TaskEvent::VideoEnded { source, error } => self.on_video_ended(source, error),
+            TaskEvent::SharpVideo { user, seq, result, .. } => {
+                if let Some(tile) = self.call.sharp.get_mut(&user) {
+                    tile.busy = false;
+                    match result {
+                        Ok(sharp) => tile.ready = Some((seq, sharp)),
+                        Err(e) => {
+                            tile.failed = true;
+                            self.note(Tone::Warn, format!("video in blocks: {e}"));
+                        }
+                    }
+                    // a newer frame may have come meanwhile
+                    self.encode_sharp_tile(user);
+                }
+            }
+            TaskEvent::Cameras(names) => {
+                if let Some(Overlay::Settings(view)) = self.overlay.as_mut() {
+                    view.cameras = Some(names);
+                }
+            }
             TaskEvent::Devices(result) => {
                 if let Some(Overlay::Settings(view)) = self.overlay.as_mut() {
                     match result {
@@ -513,7 +587,7 @@ impl App {
                 if self.voice.is_some() {
                     self.error(format!("audio did not open: {e} — text chat still works"));
                     self.net.send(ClientMsg::VoiceLeave);
-                    self.voice = None;
+                    self.leave_voice_locally();
                 } else {
                     self.error(format!("audio did not open: {e}"));
                     self.engine.set_monitor(false);
@@ -585,7 +659,8 @@ impl App {
         self.refresh_title();
 
         // redraw only if something on screen is moving
-        let animated = self.engine.running()
+        let animated = std::mem::take(&mut self.call.fresh)
+            || self.engine.running()
             || !self.transfers.is_empty()
             || self.updating.is_some()
             || !matches!(self.conn, Conn::Online | Conn::Offline)

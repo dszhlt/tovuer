@@ -2,7 +2,7 @@
 //! Run `tovuer` (asks for a nick and a room) or `tovuer --room our-place --name dana`.
 //! `tovuer --install` puts the `tovuer` command in your PATH.
 
-use std::io::{Write, stdout};
+use std::io::{BufWriter, Stdout, Write, stdout};
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -16,7 +16,7 @@ use crossterm::event::{
 use crossterm::terminal::{
     BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen, SetTitle, disable_raw_mode, enable_raw_mode,
 };
-use crossterm::{clipboard::CopyToClipboard, execute};
+use crossterm::{clipboard::CopyToClipboard, execute, queue};
 use futures_util::StreamExt;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -36,7 +36,7 @@ const BAKED_ROOM: Option<&str> = option_env!("TOVUER_ROOM");
 const BAKED_PASSWORD: Option<&str> = option_env!("TOVUER_ROOM_PASSWORD");
 const BAKED_FRIEND: Option<&str> = option_env!("TOVUER_FRIEND");
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(name = "tovuer", version = VERSION, about = "tovuer — voice and text chat right in the terminal, peer to peer")]
 struct Args {
     /// Room to join: everyone who types the same name (and password) ends up together
@@ -79,7 +79,9 @@ fn list_devices() -> anyhow::Result<()> {
 
 /// The terminal in full-screen mode; on exit (and on a panic) everything goes back.
 struct Tui {
-    terminal: Terminal<CrosstermBackend<std::io::Stdout>>,
+    /// A frame is written in one piece: a terminal (or a multiplexer like
+    /// herdr) that got only part of it would show a half-drawn picture.
+    terminal: Terminal<CrosstermBackend<BufWriter<Stdout>>>,
     enhanced_keys: bool,
     #[cfg(unix)]
     saved_stderr: Option<i32>,
@@ -121,7 +123,7 @@ impl Tui {
             restore_terminal(enhanced_keys);
             hook(info);
         }));
-        let terminal = Terminal::new(CrosstermBackend::new(out))?;
+        let terminal = Terminal::new(CrosstermBackend::new(BufWriter::with_capacity(1 << 20, out)))?;
         Ok(Self {
             terminal,
             enhanced_keys,
@@ -174,7 +176,7 @@ fn redirect_stderr(dir: &std::path::Path) -> Option<i32> {
     }
 }
 
-async fn run(args: Args) -> anyhow::Result<Option<PathBuf>> {
+async fn run(args: Args) -> anyhow::Result<Option<(PathBuf, Option<tovuer::app::Rejoin>)>> {
     let paths = match &args.config_dir {
         Some(dir) => Paths::at(dir),
         None => Paths::system(),
@@ -197,7 +199,6 @@ async fn run(args: Args) -> anyhow::Result<Option<PathBuf>> {
         secret,
         data_dir: paths.rooms_dir(),
         files_dir: paths.file_cache(),
-        release_dir: Some(paths.release_dir()),
         network: tovuer_node::Network::Internet,
     };
 
@@ -215,7 +216,8 @@ async fn run(args: Args) -> anyhow::Result<Option<PathBuf>> {
     }));
     let (net_tx, mut net_rx) = mpsc::unbounded_channel();
     let (task_tx, mut task_rx) = mpsc::unbounded_channel();
-    let handle = net::spawn(net_tx, engine.clone(), setup);
+    let decoder = tovuer::video::Decoder::spawn(task_tx.clone());
+    let handle = net::spawn(net_tx, engine.clone(), decoder, setup);
     let _ = link.set(handle.clone());
 
     let mut app = App::new(launch, paths.clone(), engine, handle, task_tx);
@@ -226,6 +228,9 @@ async fn run(args: Args) -> anyhow::Result<Option<PathBuf>> {
         app.settings.spk = spk;
     }
 
+    if app.settings.check_updates {
+        tovuer::update::check(VERSION.to_string(), app.tasks.clone());
+    }
     app.icons = tovuer::ui::icons::Icons::detect();
     app.video = transfer::video_previews_available();
     let mut tui = Tui::enter(app.settings.mouse, &paths.cache)?;
@@ -244,11 +249,16 @@ async fn run(args: Args) -> anyhow::Result<Option<PathBuf>> {
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(80));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // video is drawn as frames come, but not more often than this (60 a
+    // second), counted from the start of the last draw
+    const VIDEO_GAP: Duration = Duration::from_millis(16);
+    let mut last_draw = tokio::time::Instant::now();
 
     let outcome: anyhow::Result<()> = async {
         loop {
             if app.dirty {
                 app.dirty = false;
+                last_draw = tokio::time::Instant::now();
                 // A Sixel picture on screen that moved or got covered needs the
                 // whole screen repainted (ui::watch_fragile). A dry run into
                 // memory tells before anything is sent, so pictures go out
@@ -261,16 +271,19 @@ async fn run(args: Args) -> anyhow::Result<Option<PathBuf>> {
                     ui::render(&mut Buffer::empty(area), area, &mut app);
                     repaint = std::mem::take(&mut app.ui.repaint);
                 }
+                // Every frame is synchronized output: the terminal keeps showing
+                // the last one until this one has come whole — no flicker of
+                // half-updated video, nor of a Sixel picture erased and drawn again.
+                queue!(tui.terminal.backend_mut(), BeginSynchronizedUpdate)?;
                 if repaint {
                     // not terminal.clear(): it asks the terminal where the
                     // cursor is and fails when no answer comes
-                    execute!(tui.terminal.backend_mut(), BeginSynchronizedUpdate, Clear(ClearType::All))?;
+                    queue!(tui.terminal.backend_mut(), Clear(ClearType::All))?;
                     tui.terminal.swap_buffers(); // nothing on screen: draw it all
                 }
                 tui.terminal.draw(|frame| ui::draw(frame, &mut app))?;
-                if repaint {
-                    execute!(tui.terminal.backend_mut(), EndSynchronizedUpdate)?;
-                }
+                execute!(tui.terminal.backend_mut(), EndSynchronizedUpdate)?;
+                app.call.fresh = false;
                 app.fetch_wanted_thumbs();
             }
             for effect in std::mem::take(&mut app.effects) {
@@ -279,7 +292,15 @@ async fn run(args: Args) -> anyhow::Result<Option<PathBuf>> {
             if app.quit {
                 return Ok(());
             }
+            let video_due = app.call.fresh.then_some(last_draw + VIDEO_GAP);
+            let next_video = async {
+                match video_due {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
+                _ = next_video => app.dirty = true,
                 event = events.next() => match event {
                     Some(Ok(Event::Key(key))) => app.on_key(key),
                     Some(Ok(Event::Paste(text))) => app.on_paste(text),
@@ -311,7 +332,7 @@ async fn run(args: Args) -> anyhow::Result<Option<PathBuf>> {
     app.engine.stop();
     tui.leave();
     outcome?;
-    Ok(app.restart.take())
+    Ok(app.restart.take().map(|exe| (exe, app.rejoin.take())))
 }
 
 fn main() -> anyhow::Result<()> {
@@ -329,12 +350,40 @@ fn main() -> anyhow::Result<()> {
     }
 
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    let restart = runtime.block_on(run(args));
+    let restart = runtime.block_on(run(args.clone()));
     // background tasks (audio, network) must not hold up exiting
     runtime.shutdown_timeout(Duration::from_millis(500));
-    if let Some(exe) = restart? {
-        let error = transfer::restart(&exe);
+    if let Some((exe, rejoin)) = restart? {
+        let (argv, env) = restart_args(&args, rejoin);
+        let error = transfer::restart(&exe, &argv, &env);
         anyhow::bail!("the update is downloaded but the restart failed ({error}) — start {} again", exe.display());
     }
     Ok(())
+}
+
+/// How the updated program is started: the same devices and folders, and
+/// straight back into the room we were in (the password through the
+/// environment, never on the command line).
+fn restart_args(args: &Args, rejoin: Option<tovuer::app::Rejoin>) -> (Vec<std::ffi::OsString>, Vec<(String, String)>) {
+    let mut argv: Vec<std::ffi::OsString> = Vec::new();
+    let mut env = Vec::new();
+    let mut pass = |flag: &str, value: Option<std::ffi::OsString>| {
+        if let Some(value) = value {
+            argv.push(flag.into());
+            argv.push(value);
+        }
+    };
+    pass("--config-dir", args.config_dir.clone().map(Into::into));
+    pass("--mic", args.mic.clone().map(Into::into));
+    pass("--spk", args.spk.clone().map(Into::into));
+    let (room, name, password) = match rejoin {
+        Some(r) => (Some(r.room), Some(r.nick), r.password),
+        None => (args.room.clone(), args.name.clone(), args.password.clone()),
+    };
+    pass("--room", room.map(Into::into));
+    pass("--name", name.map(Into::into));
+    if let Some(password) = password {
+        env.push(("TOVUER_PASSWORD".to_string(), password));
+    }
+    (argv, env)
 }
