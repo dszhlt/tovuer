@@ -5081,7 +5081,7 @@ dependencies = [
 
 [[package]]
 name = "tovuer"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -5110,7 +5110,7 @@ dependencies = [
 
 [[package]]
 name = "tovuer-node"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -5126,7 +5126,7 @@ dependencies = [
 
 [[package]]
 name = "tovuer-proto"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -5134,7 +5134,7 @@ dependencies = [
 
 [[package]]
 name = "tovuer-voice"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "cpal",
  "deep_filter",
